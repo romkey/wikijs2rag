@@ -24,6 +24,25 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Read VERSION file
+        id: version
+        run: |
+          VERSION="$(cat VERSION | tr -d '[:space:]')"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Building version: ${VERSION}"
+
+      - name: Validate git tag matches VERSION
+        # When a tag push triggers the build, enforce that the tag matches
+        # the VERSION file so they can never get out of sync.
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          VERSION="${{ steps.version.outputs.version }}"
+          if [ "${TAG}" != "${VERSION}" ]; then
+            echo "::error::Git tag v${TAG} does not match VERSION file (${VERSION})"
+            exit 1
+          fi
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -44,9 +63,11 @@ jobs:
           tags: |
             # :latest on default branch
             type=raw,value=latest,enable={{is_default_branch}}
+            # :1.2.3 from VERSION file on every default-branch push
+            type=raw,value=${{ steps.version.outputs.version }},enable={{is_default_branch}}
             # :main / :master
             type=ref,event=branch
-            # :v1.2.3  (semver tags)
+            # :1.2.3 / :1.2  when a v1.2.3 git tag is pushed
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             # :sha-abc1234 (always)
@@ -61,7 +82,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             DEFAULT_EMBEDDING_MODEL=${{ vars.EMBEDDING_MODEL || 'all-MiniLM-L6-v2' }}
+            VERSION=${{ steps.version.outputs.version }}
           # Cache layers in the GitHub Actions cache to speed up rebuilds.
-          # The model download layer is large; caching it saves ~5 min per run.
           cache-from: type=gha
           cache-to: type=gha,mode=max

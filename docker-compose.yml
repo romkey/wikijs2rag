@@ -27,11 +27,13 @@ services:
   # Run it with:  docker compose run --rm wiki2rag
   # Or schedule via cron / a CI job.
   wiki2rag:
+    image: ghcr.io/romkey/wikijs2rag:${VERSION:-latest}
     build: &wiki2rag-build
       context: .
       dockerfile: Dockerfile
       args:
         DEFAULT_EMBEDDING_MODEL: ${EMBEDDING_MODEL:-all-MiniLM-L6-v2}
+        VERSION: ${VERSION:-unknown}
     env_file: &wiki2rag-env
       - .env
     environment: &wiki2rag-qdrant-env
@@ -54,6 +56,7 @@ services:
   #   docker compose run --rm query --limit 10 --show-text "event manager"
   #   docker compose run --rm query --help
   query:
+    image: ghcr.io/romkey/wikijs2rag:${VERSION:-latest}
     build: *wiki2rag-build
     entrypoint: ["python", "query.py"]
     env_file: *wiki2rag-env

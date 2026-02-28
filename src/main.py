@@ -13,6 +13,7 @@ import time
 from chunker import chunk_page
 from embedder import build_embedder
 from store import VectorStore
+from version import __version__
 from wiki_client import WikiClient, WikiClientError
 
 # ---------------------------------------------------------------------------
@@ -75,7 +76,7 @@ def run() -> None:
             time.sleep(5)
 
     with WikiClient(wiki_url, api_key) as wiki:
-        logger.info("Fetching public page list from %s …", wiki_url)
+        logger.info("wiki2rag %s  –  fetching public page list from %s …", __version__, wiki_url)
         try:
             pages = wiki.list_public_pages()
         except WikiClientError as exc:

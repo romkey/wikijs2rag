@@ -19,6 +19,7 @@ import textwrap
 
 from embedder import build_embedder
 from qdrant_client import QdrantClient
+from version import __version__
 
 
 # ── ANSI helpers ──────────────────────────────────────────────────────────────
@@ -176,7 +177,7 @@ def main() -> None:
     print()
     print(f"  {bold('Query:')} {query_text}")
     model_name = os.environ.get("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
-    print(f"  {dim(f'collection={args.collection}  model={model_name}')}")
+    print(f"  {dim(f'collection={args.collection}  model={model_name}  v{__version__}')}")
     print()
 
     if not hits:

@@ -46,6 +46,7 @@ COPY --from=deps /usr/local/bin /usr/local/bin
 
 WORKDIR /app
 COPY src/ .
+COPY VERSION .
 
 # Copy the pre-downloaded model and hand all of /app to appuser
 COPY --from=deps /app/hf-cache /app/hf-cache
@@ -55,6 +56,11 @@ RUN chown -R appuser:appuser /app
 # The named volume hf_cache in docker-compose mounts here so that models
 # persist across --rm runs without being re-downloaded.
 ENV HF_HOME=/app/hf-cache
+
+# Stamp the image with the version from the VERSION file.
+ARG VERSION=unknown
+LABEL org.opencontainers.image.version="${VERSION}"
+LABEL org.opencontainers.image.source="https://github.com/romkey/wikijs2rag"
 
 USER appuser
 
