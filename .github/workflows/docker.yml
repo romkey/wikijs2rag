@@ -1,0 +1,67 @@
+name: Build & push Docker image
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "v*.*.*"
+  pull_request:
+    branches:
+      - main
+      - master
+
+jobs:
+  build:
+    name: Build image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write   # needed to push to ghcr.io
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        # Only push on non-PR events
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            # :latest on default branch
+            type=raw,value=latest,enable={{is_default_branch}}
+            # :main / :master
+            type=ref,event=branch
+            # :v1.2.3  (semver tags)
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            # :sha-abc1234 (always)
+            type=sha,prefix=sha-,format=short
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            DEFAULT_EMBEDDING_MODEL=${{ vars.EMBEDDING_MODEL || 'all-MiniLM-L6-v2' }}
+          # Cache layers in the GitHub Actions cache to speed up rebuilds.
+          # The model download layer is large; caching it saves ~5 min per run.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

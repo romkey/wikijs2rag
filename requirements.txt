@@ -1,0 +1,11 @@
+# Wiki.js API
+httpx>=0.27.0
+
+# Vector store
+qdrant-client>=1.9.0
+
+# Local embeddings (sentence-transformers + a lean torch CPU build)
+sentence-transformers>=3.0.0
+
+# Optional: OpenAI embeddings backend
+# openai>=1.30.0
