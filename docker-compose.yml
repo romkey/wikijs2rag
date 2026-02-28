@@ -37,6 +37,8 @@ services:
     environment: &wiki2rag-qdrant-env
       QDRANT_HOST: qdrant
       QDRANT_PORT: "6333"
+    volumes: &wiki2rag-volumes
+      - hf_cache:/app/hf-cache
     depends_on: &wiki2rag-deps
       qdrant:
         condition: service_healthy
@@ -56,10 +58,18 @@ services:
     entrypoint: ["python", "query.py"]
     env_file: *wiki2rag-env
     environment: *wiki2rag-qdrant-env
+    volumes: *wiki2rag-volumes
     depends_on: *wiki2rag-deps
     restart: "no"
     mem_limit: 2g
 
 volumes:
   qdrant_data:
+    driver: local
+  # Persists the HuggingFace model cache across --rm runs.
+  # Docker seeds a named volume from the image content on first use, so the
+  # model baked in during docker build is available immediately without any
+  # re-download.  If you change EMBEDDING_MODEL, remove this volume first:
+  #   docker volume rm wiki2rag_hf_cache
+  hf_cache:
     driver: local

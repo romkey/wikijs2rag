@@ -11,15 +11,14 @@ RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/wh
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Pre-download the default sentence-transformers model so the container
-# works without internet access at runtime.
-# Override by setting DEFAULT_EMBEDDING_MODEL at build time:
-#   docker build --build-arg DEFAULT_EMBEDDING_MODEL=all-mpnet-base-v2 …
+# Pre-download the default sentence-transformers model into /app/hf-cache.
+# HF_HOME is set here and carried into the final image so the runtime
+# process always finds the model at this fixed path regardless of which
+# user runs the container.
+# Override at build time:  docker build --build-arg DEFAULT_EMBEDDING_MODEL=all-mpnet-base-v2 …
 ARG DEFAULT_EMBEDDING_MODEL=all-MiniLM-L6-v2
-# Pass the model name via env var so Python can read it unambiguously from
-# os.environ; avoids shell quoting issues with the -c one-liner.
-RUN HF_MODEL="${DEFAULT_EMBEDDING_MODEL}" python -c \
-    "import os, sys; \
+RUN HF_HOME=/app/hf-cache HF_MODEL="${DEFAULT_EMBEDDING_MODEL}" python -c \
+    "import os; \
      from sentence_transformers import SentenceTransformer; \
      m = os.environ['HF_MODEL']; \
      print('Downloading model:', m, flush=True); \
@@ -35,16 +34,22 @@ COPY --from=deps /usr/local/lib/python3.12/site-packages \
                   /usr/local/lib/python3.12/site-packages
 COPY --from=deps /usr/local/bin /usr/local/bin
 
-# Copy pre-downloaded HuggingFace / sentence-transformers model cache
-COPY --from=deps /root/.cache /root/.cache
+# Create app user before chowning files
+RUN useradd -m -u 1000 appuser
 
 WORKDIR /app
 COPY src/ .
 
-# Run as a non-root user
-RUN useradd -m -u 1000 appuser && chown -R appuser /app
-# The model cache lives in /root/.cache – make it readable
-RUN chmod -R a+rX /root/.cache
+# Copy the pre-downloaded model cache and hand ownership to appuser.
+# HF_HOME tells HuggingFace/sentence-transformers to look here at runtime.
+# Docker initialises a named volume from image content on first use, so
+# mounting hf_cache:/ app/hf-cache persists the model across --rm runs
+# without re-downloading.
+COPY --from=deps /app/hf-cache /app/hf-cache
+RUN chown -R appuser:appuser /app
+
+ENV HF_HOME=/app/hf-cache
+
 USER appuser
 
 CMD ["python", "main.py"]
