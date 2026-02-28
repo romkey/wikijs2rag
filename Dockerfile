@@ -3,10 +3,10 @@ FROM python:3.12-slim AS deps
 
 WORKDIR /install
 
-# torch CPU-only wheel is much smaller than the default GPU build
-RUN pip install --no-cache-dir \
-    torch==2.3.1+cpu \
-    --extra-index-url https://download.pytorch.org/whl/cpu
+# torch CPU-only wheel — unpinned so the latest compatible version is used.
+# --index-url (not --extra-index-url) ensures pip fetches only from the
+# PyTorch CPU index for this step, which is where +cpu wheels live.
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
