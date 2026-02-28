@@ -5,8 +5,10 @@ beautifulsoup4>=4.12.0
 # Vector store
 qdrant-client>=1.9.0
 
-# Local embeddings (sentence-transformers + a lean torch CPU build)
-sentence-transformers>=3.0.0
+# Local embeddings
+# fastembed uses ONNX Runtime instead of PyTorch — ~150 MB vs ~800 MB,
+# supports the same model names as sentence-transformers.
+fastembed>=0.4.0
 
 # Optional: OpenAI embeddings backend
 # openai>=1.30.0

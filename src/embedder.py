@@ -3,8 +3,9 @@ Embedding backends.
 
 Supports two backends selected by the EMBEDDING_BACKEND env var:
 
-  local  – sentence-transformers running entirely in-process (default).
-            Set EMBEDDING_MODEL to any sentence-transformers model name.
+  local  – fastembed (ONNX Runtime, no PyTorch required).  Fast to install,
+            small image.  Set EMBEDDING_MODEL to any model name listed by
+            fastembed.list_supported_models().  Default: all-MiniLM-L6-v2.
 
   openai – OpenAI Embeddings API.
             Requires OPENAI_API_KEY.  Set EMBEDDING_MODEL to e.g.
@@ -14,8 +15,6 @@ Supports two backends selected by the EMBEDDING_BACKEND env var:
 import logging
 import os
 from typing import Protocol
-
-import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -28,30 +27,37 @@ class Embedder(Protocol):
 
 
 # ---------------------------------------------------------------------------
-# Local (sentence-transformers) backend
+# Local (fastembed / ONNX) backend
 # ---------------------------------------------------------------------------
 
 class LocalEmbedder:
     def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
-        logger.info("Loading local embedding model: %s", model_name)
-        from sentence_transformers import SentenceTransformer  # noqa: PLC0415
+        try:
+            from fastembed import TextEmbedding  # noqa: PLC0415
+        except ImportError as exc:
+            raise ImportError(
+                "fastembed is required for the local backend: pip install fastembed"
+            ) from exc
 
-        self._model = SentenceTransformer(model_name)
-        self._dim: int = self._model.get_sentence_embedding_dimension()
-        logger.info("Model loaded  (dim=%d)", self._dim)
+        # HF_HOME is set in the Docker image to the baked-in model directory.
+        # Locally it falls back to ~/.cache/fastembed.
+        cache_dir = os.environ.get("HF_HOME") or os.path.expanduser("~/.cache/fastembed")
+        logger.info("Loading embedding model: %s  (cache: %s)", model_name, cache_dir)
+
+        self._model = TextEmbedding(model_name=model_name, cache_dir=cache_dir)
+
+        # Resolve vector dimension by encoding a single probe string.
+        probe = next(iter(self._model.embed(["dimension probe"])))
+        self._dim: int = len(probe)
+        logger.info("Model ready (dim=%d)", self._dim)
 
     @property
     def dimension(self) -> int:
         return self._dim
 
     def encode(self, texts: list[str], batch_size: int = 32) -> list[list[float]]:
-        vectors: np.ndarray = self._model.encode(
-            texts,
-            batch_size=batch_size,
-            show_progress_bar=len(texts) > 50,
-            normalize_embeddings=True,
-        )
-        return vectors.tolist()
+        embeddings = list(self._model.embed(texts, batch_size=batch_size))
+        return [e.tolist() for e in embeddings]
 
 
 # ---------------------------------------------------------------------------
