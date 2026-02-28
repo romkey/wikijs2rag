@@ -16,13 +16,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Override by setting DEFAULT_EMBEDDING_MODEL at build time:
 #   docker build --build-arg DEFAULT_EMBEDDING_MODEL=all-mpnet-base-v2 …
 ARG DEFAULT_EMBEDDING_MODEL=all-MiniLM-L6-v2
-RUN python - <<'EOF'
-import os, sys
-model = os.environ.get("DEFAULT_EMBEDDING_MODEL") or sys.argv[1]
-from sentence_transformers import SentenceTransformer
-print(f"Downloading model: {model}")
-SentenceTransformer(model)
-EOF
+RUN python -c "from sentence_transformers import SentenceTransformer; print('Downloading model: ${DEFAULT_EMBEDDING_MODEL}'); SentenceTransformer('${DEFAULT_EMBEDDING_MODEL}')"
 
 
 # ── Stage 2: final image ───────────────────────────────────────────────────────
