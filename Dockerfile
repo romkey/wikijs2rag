@@ -1,7 +1,6 @@
 # syntax=docker/dockerfile:1
 # The directive above enables BuildKit cache mounts (--mount=type=cache),
-# which persist pip's package cache and the model download across builds
-# so that only changed layers are re-fetched.
+# which persist pip's package cache between builds.
 
 # ── Stage 1: dependency installation ──────────────────────────────────────────
 FROM python:3.12-slim AS deps
@@ -16,21 +15,17 @@ COPY requirements.txt .
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements.txt
 
-# Pre-download the embedding model into /app/hf-cache.
-# --mount=type=cache keeps the raw downloaded files across builds so that
-# the model is only fetched from the internet once, even when the layer is
-# invalidated (e.g. after a requirements.txt change).
-# Override at build time:  docker build --build-arg DEFAULT_EMBEDDING_MODEL=BAAI/bge-base-en-v1.5 …
-ARG DEFAULT_EMBEDDING_MODEL=all-MiniLM-L6-v2
-RUN --mount=type=cache,target=/tmp/model-dl-cache \
-    HF_MODEL="${DEFAULT_EMBEDDING_MODEL}" python -c \
-    "import os, shutil; \
+# Pre-download the embedding model directly into /app/hf-cache so it is
+# baked into the image layer and available without internet access at runtime.
+# Override at build time:
+#   docker build --build-arg DEFAULT_EMBEDDING_MODEL=BAAI/bge-base-en-v1.5 …
+ARG DEFAULT_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5
+RUN HF_MODEL="${DEFAULT_EMBEDDING_MODEL}" python -c \
+    "import os; \
      from fastembed import TextEmbedding; \
      m = os.environ['HF_MODEL']; \
      print('Downloading model:', m, flush=True); \
-     model = TextEmbedding(model_name=m, cache_dir='/tmp/model-dl-cache'); \
-     list(model.embed(['warmup'])); \
-     shutil.copytree('/tmp/model-dl-cache', '/app/hf-cache', dirs_exist_ok=True); \
+     list(TextEmbedding(model_name=m, cache_dir='/app/hf-cache').embed(['warmup'])); \
      print('Model ready.', flush=True)"
 
 
@@ -52,7 +47,7 @@ COPY VERSION .
 COPY --from=deps /app/hf-cache /app/hf-cache
 RUN chown -R appuser:appuser /app
 
-# HF_HOME tells fastembed (and HuggingFace libs) where to find models.
+# HF_HOME tells fastembed where to find models at runtime.
 # The named volume hf_cache in docker-compose mounts here so that models
 # persist across --rm runs without being re-downloaded.
 ENV HF_HOME=/app/hf-cache

@@ -31,7 +31,7 @@ class Embedder(Protocol):
 # ---------------------------------------------------------------------------
 
 class LocalEmbedder:
-    def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
+    def __init__(self, model_name: str = "BAAI/bge-small-en-v1.5"):
         try:
             from fastembed import TextEmbedding  # noqa: PLC0415
         except ImportError as exc:
@@ -113,6 +113,6 @@ def build_embedder() -> Embedder:
     if backend == "openai":
         return OpenAIEmbedder(model or OpenAIEmbedder._DEFAULT_MODEL)
     elif backend == "local":
-        return LocalEmbedder(model or "all-MiniLM-L6-v2")
+        return LocalEmbedder(model or "BAAI/bge-small-en-v1.5")
     else:
         raise ValueError(f"Unknown EMBEDDING_BACKEND: {backend!r}  (choose 'local' or 'openai')")
