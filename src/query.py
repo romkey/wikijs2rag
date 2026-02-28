@@ -148,13 +148,26 @@ def main() -> None:
 
     try:
         client = QdrantClient(host=host, port=port)
-        hits = client.search(
-            collection_name=args.collection,
-            query_vector=query_vector,
-            limit=args.limit,
-            with_payload=True,
-            score_threshold=args.min_score if args.min_score > 0 else None,
-        )
+        # query_points() is the current API (qdrant-client >= 1.10);
+        # fall back to the legacy search() for older installs.
+        threshold = args.min_score if args.min_score > 0 else None
+        if hasattr(client, "query_points"):
+            response = client.query_points(
+                collection_name=args.collection,
+                query=query_vector,
+                limit=args.limit,
+                with_payload=True,
+                score_threshold=threshold,
+            )
+            hits = response.points
+        else:
+            hits = client.search(
+                collection_name=args.collection,
+                query_vector=query_vector,
+                limit=args.limit,
+                with_payload=True,
+                score_threshold=threshold,
+            )
     except Exception as exc:
         print(f"Qdrant error: {exc}", file=sys.stderr)
         sys.exit(1)
