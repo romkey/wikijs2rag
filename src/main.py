@@ -97,8 +97,14 @@ def run() -> None:
             try:
                 page = wiki.get_page(page_id)
             except WikiClientError as exc:
-                logger.error("  Could not fetch page %d: %s", page_id, exc)
-                errors += 1
+                # Wiki.js lists some restricted pages as public but rejects
+                # the content fetch.  Treat those as skips, not errors.
+                if "not authorized" in str(exc).lower() or "6013" in str(exc):
+                    logger.warning("  Page %d is access-restricted, skipping.", page_id)
+                    skipped += 1
+                else:
+                    logger.error("  Could not fetch page %d: %s", page_id, exc)
+                    errors += 1
                 continue
 
             if not page or not (page.get("content") or "").strip():

@@ -115,9 +115,12 @@ class VectorStore:
 
     def collection_info(self) -> dict:
         info = self._client.get_collection(self._collection)
+        # vectors_count was made optional (and removed in some client versions);
+        # fall back to points_count which is always present.
+        vectors_count = getattr(info, "vectors_count", None) or getattr(info, "points_count", None)
         return {
             "name": self._collection,
-            "vectors_count": info.vectors_count,
-            "points_count": info.points_count,
+            "vectors_count": vectors_count,
+            "points_count": getattr(info, "points_count", None),
             "status": str(info.status),
         }
