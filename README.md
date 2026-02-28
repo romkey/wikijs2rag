@@ -77,9 +77,56 @@ stale chunks.
 
 ---
 
+## Querying
+
+### Command-line query tool
+
+`query.py` lets you search the collection directly from the terminal.
+
+**Via Docker (recommended):**
+
+```bash
+# Basic search
+docker compose run --rm query "how do I reset my password?"
+
+# More results
+docker compose run --rm query --limit 10 "event manager setup"
+
+# Show matching text under each result
+docker compose run --rm query --show-text "access control"
+
+# Filter out weak matches
+docker compose run --rm query --min-score 0.6 "door code"
+
+# Different collection
+docker compose run --rm query --collection wiki-internal "onboarding"
+
+# All options
+docker compose run --rm query --help
+```
+
+**Locally (outside Docker):**
+
+```bash
+# Point at localhost since we're outside the compose network
+QDRANT_HOST=localhost python src/query.py "how do I reset my password?"
+```
+
+**Options:**
+
+| Flag | Default | Description |
+|---|---|---|
+| `--limit N` | `5` | Number of results |
+| `--show-text` | off | Print matched chunk text |
+| `--min-score F` | `0.0` | Hide results below this similarity (0–1) |
+| `--collection NAME` | `wiki` | Qdrant collection to search |
+| `--width N` | `100` | Terminal width for text wrapping |
+
+---
+
 ## Querying from other applications
 
-Any language/framework that has a Qdrant client can query the store directly.
+Any language/framework with a Qdrant client can query the store directly.
 
 **Python example:**
 
@@ -173,8 +220,9 @@ Then rebuild: `docker compose build wiki2rag`.
 ```
 wiki2rag/
 ├── src/
-│   ├── main.py          # entry point / orchestration
-│   ├── wiki_client.py   # Wiki.js GraphQL client
+│   ├── main.py          # ingestion entry point / orchestration
+│   ├── query.py         # command-line query tool
+│   ├── wiki_client.py   # Wiki.js GraphQL client (+ HTML scraping fallback)
 │   ├── chunker.py       # markdown/HTML → overlapping text chunks
 │   ├── embedder.py      # local or OpenAI embedding backends
 │   └── store.py         # Qdrant wrapper

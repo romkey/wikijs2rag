@@ -27,22 +27,37 @@ services:
   # Run it with:  docker compose run --rm wiki2rag
   # Or schedule via cron / a CI job.
   wiki2rag:
-    build:
+    build: &wiki2rag-build
       context: .
       dockerfile: Dockerfile
       args:
         DEFAULT_EMBEDDING_MODEL: ${EMBEDDING_MODEL:-all-MiniLM-L6-v2}
-    env_file:
+    env_file: &wiki2rag-env
       - .env
-    environment:
+    environment: &wiki2rag-qdrant-env
       QDRANT_HOST: qdrant
       QDRANT_PORT: "6333"
-    depends_on:
+    depends_on: &wiki2rag-deps
       qdrant:
         condition: service_healthy
     # No restart policy – it's a one-shot job
     restart: "no"
     # Give the model enough memory; raise if using a larger model
+    mem_limit: 2g
+
+  # ── query tool ───────────────────────────────────────────────────────────
+  # Interactive search against the Qdrant collection.
+  # Usage:
+  #   docker compose run --rm query "how do I reset my password?"
+  #   docker compose run --rm query --limit 10 --show-text "event manager"
+  #   docker compose run --rm query --help
+  query:
+    build: *wiki2rag-build
+    entrypoint: ["python", "query.py"]
+    env_file: *wiki2rag-env
+    environment: *wiki2rag-qdrant-env
+    depends_on: *wiki2rag-deps
+    restart: "no"
     mem_limit: 2g
 
 volumes:
