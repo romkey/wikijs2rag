@@ -95,16 +95,12 @@ def run() -> None:
             logger.info("[%d/%d] Processing page %d: %s", i, total, page_id, title)
 
             try:
-                page = wiki.get_page(page_id)
+                # Pass meta so get_page() can fall back to HTML scraping
+                # if the GraphQL API returns a 6013 (PageViewForbidden) error.
+                page = wiki.get_page(page_id, meta=meta)
             except WikiClientError as exc:
-                # Wiki.js lists some restricted pages as public but rejects
-                # the content fetch.  Treat those as skips, not errors.
-                if "not authorized" in str(exc).lower() or "6013" in str(exc):
-                    logger.warning("  Page %d is access-restricted, skipping.", page_id)
-                    skipped += 1
-                else:
-                    logger.error("  Could not fetch page %d: %s", page_id, exc)
-                    errors += 1
+                logger.error("  Could not fetch page %d: %s", page_id, exc)
+                errors += 1
                 continue
 
             if not page or not (page.get("content") or "").strip():
