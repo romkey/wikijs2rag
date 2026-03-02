@@ -91,8 +91,7 @@ def main() -> None:
               QDRANT_HOST        default: localhost
               QDRANT_PORT        default: 6333
               QDRANT_COLLECTION  default: wiki
-              EMBEDDING_BACKEND  default: local  (local, ollama, openai)
-              EMBEDDING_MODEL    default: BAAI/bge-small-en-v1.5
+              EMBEDDING_MODEL    default: nomic-embed-text
               OLLAMA_URL         default: http://localhost:11434
         """),
     )
@@ -177,7 +176,7 @@ def main() -> None:
     # ── Print results ─────────────────────────────────────────────────────────
     print()
     print(f"  {bold('Query:')} {query_text}")
-    model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
+    model_name = os.environ.get("EMBEDDING_MODEL", "nomic-embed-text")
     print(f"  {dim(f'collection={args.collection}  model={model_name}  v{__version__}')}")
     print()
 

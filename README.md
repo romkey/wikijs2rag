@@ -2,7 +2,8 @@
 
 Ingests all **public** pages from a [Wiki.js](https://js.wiki/) instance into a
 [Qdrant](https://qdrant.tech/) vector store, ready for use in any RAG
-(Retrieval-Augmented Generation) pipeline.
+(Retrieval-Augmented Generation) pipeline.  Uses [Ollama](https://ollama.com/)
+for embeddings — no cloud API keys required.
 
 ## How it works
 
@@ -16,7 +17,7 @@ Wiki.js GraphQL API
    chunker.py      ← structure-aware splitting: headers → tables/lists → word window
       │
       ▼
-   embedder.py     ← encodes chunks (local fastembed/ONNX or OpenAI)
+   embedder.py     ← encodes chunks via Ollama's HTTP API
       │
       ▼
     store.py       ← upserts into Qdrant with payload indexes
@@ -28,30 +29,42 @@ to this ingestion code required.
 
 ---
 
+## Prerequisites
+
+- **Docker** and **Docker Compose**
+- **Ollama** running on the host with an embedding model pulled:
+
+```bash
+ollama pull nomic-embed-text
+```
+
+---
+
 ## Quick start
 
 ### 1 – Copy and edit the config
 
 ```bash
 cp .env.example .env
-$EDITOR .env          # set WIKI_URL at minimum
+$EDITOR .env          # set WIKI_URL and OLLAMA_URL at minimum
 ```
 
 **Required:**
 
-| Variable   | Description                      |
-|------------|----------------------------------|
-| `WIKI_URL` | Base URL of your Wiki.js instance |
+| Variable          | Default                               | Description                      |
+|-------------------|---------------------------------------|----------------------------------|
+| `WIKI_URL`        | —                                     | Base URL of your Wiki.js instance |
+| `OLLAMA_URL`      | `http://host.docker.internal:11434`   | URL of your Ollama instance      |
+| `EMBEDDING_MODEL` | `nomic-embed-text`                    | Ollama embedding model name      |
 
 **Optional but common:**
 
-| Variable             | Default                  | Description                                |
-|----------------------|--------------------------|--------------------------------------------|
-| `WIKI_API_KEY`       | *(empty)*                | API key if the wiki requires auth          |
-| `QDRANT_COLLECTION`  | `wiki`                   | Collection name (one per wiki is sensible) |
-| `EMBEDDING_MODEL`    | `BAAI/bge-small-en-v1.5` | Any fastembed-supported model name        |
-| `CHUNK_SIZE`         | `256`                    | Max words per chunk                        |
-| `FORCE_REINGEST`     | `false`                  | Set `true` to re-ingest unchanged pages    |
+| Variable             | Default              | Description                                |
+|----------------------|----------------------|--------------------------------------------|
+| `WIKI_API_KEY`       | *(empty)*            | API key if the wiki requires auth          |
+| `QDRANT_COLLECTION`  | `wiki`               | Collection name (one per wiki is sensible) |
+| `CHUNK_SIZE`         | `256`                | Max words per chunk                        |
+| `FORCE_REINGEST`     | `false`              | Set `true` to re-ingest unchanged pages    |
 
 See `.env.example` for the full list.
 
@@ -71,12 +84,25 @@ docker compose build wiki2rag    # only needed once (or after code changes)
 docker compose run --rm wiki2rag
 ```
 
-The first build downloads the embedding model and bakes it into the image.
-Subsequent runs start in seconds.
+The image is lightweight (~200 MB) since embeddings are handled by Ollama —
+no ML frameworks or models baked in.
 
 Ingestion is **incremental** – only pages whose `updatedAt` timestamp has
 changed are re-fetched and re-embedded.  Set `FORCE_REINGEST=true` to
 override this and re-ingest everything.
+
+### Ollama embedding models
+
+| Model | Dimensions | Notes |
+|---|---|---|
+| `nomic-embed-text` | 768 | Good balance of speed and quality (default) |
+| `all-minilm` | 384 | Fast, small |
+| `mxbai-embed-large` | 1024 | Highest quality |
+| `snowflake-arctic-embed` | 1024 | Strong retrieval performance |
+
+> **Note:** Changing models requires a new Qdrant collection (different
+> dimensions).  Set a new `QDRANT_COLLECTION` name and run with
+> `FORCE_REINGEST=true`.
 
 ---
 
@@ -111,7 +137,6 @@ docker compose run --rm query --help
 **Locally (outside Docker):**
 
 ```bash
-# Point at localhost since we're outside the compose network
 QDRANT_HOST=localhost python src/query.py "how do I reset my password?"
 ```
 
@@ -134,13 +159,17 @@ Any language/framework with a Qdrant client can query the store directly.
 **Python example:**
 
 ```python
-from fastembed import TextEmbedding
+import httpx
 from qdrant_client import QdrantClient
 
 client = QdrantClient(host="localhost", port=6333)
-model  = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
 
-query_vector = list(model.embed(["How do I reset my password?"]))[0].tolist()
+# Get embedding from Ollama
+resp = httpx.post("http://localhost:11434/api/embed", json={
+    "model": "nomic-embed-text",
+    "input": ["How do I reset my password?"],
+})
+query_vector = resp.json()["embeddings"][0]
 
 results = client.query_points(
     collection_name="wiki",
@@ -152,7 +181,7 @@ results = client.query_points(
 for hit in results:
     p = hit.payload
     print(f"{hit.score:.3f}  {p['page_title']}  {p['page_url']}")
-    # Use p["context"] for LLM grounding – it includes title, section, description
+    # Use p["context"] for LLM grounding – includes title, section, description
     print(p["context"][:300])
     print()
 ```
@@ -186,9 +215,7 @@ for hit in results:
   the page title, description, and section breadcrumb, giving the LLM enough
   surrounding information to produce accurate answers.
 
-- **Filter by tags** for scoped search.  If your wiki tags pages by topic
-  (e.g. "safety", "events", "membership"), pass a Qdrant filter to constrain
-  results:
+- **Filter by tags** for scoped search:
   ```python
   from qdrant_client.models import Filter, FieldCondition, MatchValue
   results = client.query_points(
@@ -249,57 +276,6 @@ FORCE_REINGEST=true docker compose run --rm wiki2rag
 
 ---
 
-## Using Ollama for embeddings
-
-If you're already running [Ollama](https://ollama.com/) locally, you can use
-it for embeddings instead of the built-in fastembed model.  No extra Python
-packages are needed — the Ollama backend talks to Ollama's HTTP API directly.
-
-```bash
-# Pull an embedding model in Ollama first
-ollama pull nomic-embed-text
-```
-
-```dotenv
-EMBEDDING_BACKEND=ollama
-EMBEDDING_MODEL=nomic-embed-text
-OLLAMA_URL=http://host.docker.internal:11434
-```
-
-> `host.docker.internal` resolves to the host machine from inside Docker
-> containers on macOS and Windows.  On Linux, use `--add-host=host.docker.internal:host-gateway`
-> or set `OLLAMA_URL` to the actual LAN IP.
-
-Popular Ollama embedding models:
-
-| Model | Dimensions | Notes |
-|---|---|---|
-| `nomic-embed-text` | 768 | Good balance of speed and quality (default) |
-| `all-minilm` | 384 | Fast, small |
-| `mxbai-embed-large` | 1024 | Highest quality |
-| `snowflake-arctic-embed` | 1024 | Strong retrieval performance |
-
-No rebuild needed — just change `.env` and re-run ingestion with
-`FORCE_REINGEST=true` (different model = different vectors).
-
-> **Note:** Change the collection name when switching embedding models –
-> vector dimensions differ and the old collection cannot be reused.
-
-## Switching to OpenAI embeddings
-
-```dotenv
-EMBEDDING_BACKEND=openai
-EMBEDDING_MODEL=text-embedding-3-small
-OPENAI_API_KEY=sk-...
-```
-
-No rebuild needed — just change `.env` and re-run ingestion.
-
-> **Note:** Change the collection name when switching embedding models –
-> vector dimensions differ and the old collection cannot be reused.
-
----
-
 ## File layout
 
 ```
@@ -309,7 +285,7 @@ wiki2rag/
 │   ├── query.py         # command-line query tool
 │   ├── wiki_client.py   # Wiki.js GraphQL client (+ HTML scraping fallback)
 │   ├── chunker.py       # structure-aware text chunking
-│   ├── embedder.py      # embedding backends (fastembed, Ollama, OpenAI)
+│   ├── embedder.py      # Ollama embedding backend
 │   ├── store.py         # Qdrant wrapper with payload indexes
 │   └── version.py       # version from VERSION file
 ├── docker-compose.yml

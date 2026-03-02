@@ -1,10 +1,6 @@
-# Wiki.js API + HTML scraping fallback
+# Wiki.js API + HTML scraping fallback + Ollama embeddings
 httpx>=0.27.0
 beautifulsoup4>=4.12.0
 
-# Vector store — REST-only client avoids the 17 MB grpcio dependency.
-# Use qdrant-client[grpc] if you need gRPC.
+# Vector store
 qdrant-client>=1.9.0
-
-# Local embeddings (ONNX Runtime, no PyTorch)
-fastembed>=0.4.0

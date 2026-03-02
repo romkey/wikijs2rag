@@ -23,56 +23,40 @@ services:
       start_period: 20s
 
   # ── wiki2rag ingestion job ────────────────────────────────────────────────
-  # This service exits after ingestion is complete.
-  # Run it with:  docker compose run --rm wiki2rag
-  # Or schedule via cron / a CI job.
+  # Run with:  docker compose run --rm wiki2rag
   wiki2rag:
     image: ghcr.io/romkey/wikijs2rag:${VERSION:-latest}
     build: &wiki2rag-build
       context: .
       dockerfile: Dockerfile
       args:
-        DEFAULT_EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-small-en-v1.5}
         VERSION: ${VERSION:-unknown}
     env_file: &wiki2rag-env
       - .env
     environment: &wiki2rag-qdrant-env
       QDRANT_HOST: qdrant
       QDRANT_PORT: "6333"
-    volumes: &wiki2rag-volumes
-      - hf_cache:/app/hf-cache
+    extra_hosts: &wiki2rag-hosts
+      - "host.docker.internal:host-gateway"
     depends_on: &wiki2rag-deps
       qdrant:
         condition: service_healthy
-    # No restart policy – it's a one-shot job
     restart: "no"
-    # Give the model enough memory; raise if using a larger model
-    mem_limit: 2g
 
   # ── query tool ───────────────────────────────────────────────────────────
-  # Interactive search against the Qdrant collection.
   # Usage:
   #   docker compose run --rm query "how do I reset my password?"
   #   docker compose run --rm query --limit 10 --show-text "event manager"
-  #   docker compose run --rm query --help
   query:
     image: ghcr.io/romkey/wikijs2rag:${VERSION:-latest}
     build: *wiki2rag-build
     entrypoint: ["python", "query.py"]
     env_file: *wiki2rag-env
     environment: *wiki2rag-qdrant-env
-    volumes: *wiki2rag-volumes
+    extra_hosts: *wiki2rag-hosts
     depends_on: *wiki2rag-deps
     restart: "no"
-    mem_limit: 2g
 
 volumes:
   qdrant_data:
-    driver: local
-  # Persists the HuggingFace model cache across --rm runs.
-  # Docker seeds a named volume from the image content on first use, so the
-  # model baked in during docker build is available immediately without any
-  # re-download.  If you change EMBEDDING_MODEL, remove this volume first:
-  #   docker volume rm wiki2rag_hf_cache
-  hf_cache:
     driver: local
