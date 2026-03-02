@@ -2,13 +2,9 @@
 httpx>=0.27.0
 beautifulsoup4>=4.12.0
 
-# Vector store
+# Vector store — REST-only client avoids the 17 MB grpcio dependency.
+# Use qdrant-client[grpc] if you need gRPC.
 qdrant-client>=1.9.0
 
-# Local embeddings
-# fastembed uses ONNX Runtime instead of PyTorch — ~150 MB vs ~800 MB,
-# supports the same model names as sentence-transformers.
+# Local embeddings (ONNX Runtime, no PyTorch)
 fastembed>=0.4.0
-
-# Optional: OpenAI embeddings backend
-# openai>=1.30.0

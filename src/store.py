@@ -37,14 +37,11 @@ class VectorStore:
         port: int,
         collection: str,
         vector_size: int,
-        grpc_port: int = 6334,
-        prefer_grpc: bool = False,
     ):
         self._client = QdrantClient(
             host=host,
             port=port,
-            grpc_port=grpc_port,
-            prefer_grpc=prefer_grpc,
+            prefer_grpc=False,
         )
         self._collection = collection
         self._vector_size = vector_size
