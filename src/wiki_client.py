@@ -32,7 +32,9 @@ query {
       isPublished
       isPrivate
       contentType
+      createdAt
       updatedAt
+      authorName
     }
   }
 }

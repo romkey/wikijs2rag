@@ -16,6 +16,8 @@ import os
 import sys
 import time
 import uuid
+from collections import Counter
+from datetime import datetime
 
 from chunker import Chunk, chunk_page
 from embedder import build_embedder
@@ -148,6 +150,192 @@ def _build_payloads(
 
 
 # ---------------------------------------------------------------------------
+# Wiki metadata generation
+# ---------------------------------------------------------------------------
+
+def _build_wiki_metadata(
+    pages: list[dict],
+    wiki_url: str,
+    all_tags: Counter | None = None,
+) -> list[dict]:
+    """
+    Derive wiki-level metadata from the page list.
+
+    *all_tags* is a Counter of tag→count collected during page ingestion
+    (since the list query doesn't include tags).
+
+    Returns a list of metadata chunk dicts, each with a 'text' field suitable
+    for embedding and a 'context' field for LLM grounding.
+    """
+    total_pages = len(pages)
+
+    # Contributors
+    authors = Counter(p.get("authorName") or "Unknown" for p in pages)
+    num_contributors = len(authors)
+    top_contributors = authors.most_common(10)
+
+    # Tags (passed in from ingestion loop)
+    if all_tags is None:
+        all_tags = Counter()
+    top_tags = all_tags.most_common(20)
+
+    # Date analysis
+    def _parse_dt(s: str) -> datetime | None:
+        if not s:
+            return None
+        try:
+            return datetime.fromisoformat(s.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+
+    pages_with_updated = [
+        (p, _parse_dt(p.get("updatedAt", "")))
+        for p in pages
+    ]
+    pages_with_updated = [(p, dt) for p, dt in pages_with_updated if dt]
+    pages_with_updated.sort(key=lambda x: x[1], reverse=True)
+
+    pages_with_created = [
+        (p, _parse_dt(p.get("createdAt", "")))
+        for p in pages
+    ]
+    pages_with_created = [(p, dt) for p, dt in pages_with_created if dt]
+    pages_with_created.sort(key=lambda x: x[1])
+
+    recently_updated = pages_with_updated[:10]
+    newest_pages = sorted(pages_with_created, key=lambda x: x[1], reverse=True)[:10]
+    oldest_pages = pages_with_created[:10]
+
+    # --- Build text chunks ---
+    chunks: list[dict] = []
+
+    # Overview chunk
+    overview_lines = [
+        f"Wiki statistics and overview for {wiki_url}",
+        f"Total public pages: {total_pages}",
+        f"Number of contributors: {num_contributors}",
+        f"Number of unique tags: {len(all_tags)}",
+    ]
+    if pages_with_updated:
+        latest = pages_with_updated[0]
+        overview_lines.append(
+            f"Most recently updated page: \"{latest[0].get('title', '')}\" "
+            f"on {latest[1].strftime('%Y-%m-%d')}"
+        )
+    if pages_with_created:
+        oldest = pages_with_created[0]
+        overview_lines.append(
+            f"Oldest page: \"{oldest[0].get('title', '')}\" "
+            f"created on {oldest[1].strftime('%Y-%m-%d')}"
+        )
+
+    overview_text = "\n".join(overview_lines)
+    chunks.append({
+        "text":        overview_text,
+        "context":     f"[Wiki Metadata | Overview]\n\n{overview_text}",
+        "page_title":  "Wiki Statistics",
+        "page_path":   "_meta/overview",
+        "page_url":    wiki_url,
+        "section":     "Overview",
+        "meta_type":   "overview",
+    })
+
+    # Contributors chunk
+    contrib_lines = [
+        f"Wiki contributors ({num_contributors} total):",
+    ]
+    for author, count in top_contributors:
+        contrib_lines.append(f"  - {author}: {count} page{'s' if count != 1 else ''}")
+    contrib_text = "\n".join(contrib_lines)
+    chunks.append({
+        "text":        contrib_text,
+        "context":     f"[Wiki Metadata | Contributors]\n\n{contrib_text}",
+        "page_title":  "Wiki Contributors",
+        "page_path":   "_meta/contributors",
+        "page_url":    wiki_url,
+        "section":     "Contributors",
+        "meta_type":   "contributors",
+    })
+
+    # Tags chunk
+    if top_tags:
+        tags_lines = [
+            f"Wiki tags and topics ({len(all_tags)} unique tags):",
+        ]
+        for tag, count in top_tags:
+            tags_lines.append(f"  - {tag}: {count} page{'s' if count != 1 else ''}")
+        tags_text = "\n".join(tags_lines)
+        chunks.append({
+            "text":        tags_text,
+            "context":     f"[Wiki Metadata | Tags and Topics]\n\n{tags_text}",
+            "page_title":  "Wiki Tags and Topics",
+            "page_path":   "_meta/tags",
+            "page_url":    wiki_url,
+            "section":     "Tags",
+            "meta_type":   "tags",
+        })
+
+    # Recently updated chunk
+    if recently_updated:
+        recent_lines = ["Recently updated wiki pages:"]
+        for p, dt in recently_updated:
+            title = p.get("title") or p.get("path") or "Untitled"
+            author = p.get("authorName") or "Unknown"
+            recent_lines.append(
+                f"  - \"{title}\" updated on {dt.strftime('%Y-%m-%d')} by {author}"
+            )
+        recent_text = "\n".join(recent_lines)
+        chunks.append({
+            "text":        recent_text,
+            "context":     f"[Wiki Metadata | Recently Updated]\n\n{recent_text}",
+            "page_title":  "Recently Updated Pages",
+            "page_path":   "_meta/recent",
+            "page_url":    wiki_url,
+            "section":     "Recently Updated",
+            "meta_type":   "recent",
+        })
+
+    # Newest pages chunk
+    if newest_pages:
+        new_lines = ["Newest wiki pages (most recently created):"]
+        for p, dt in newest_pages:
+            title = p.get("title") or p.get("path") or "Untitled"
+            author = p.get("authorName") or "Unknown"
+            new_lines.append(
+                f"  - \"{title}\" created on {dt.strftime('%Y-%m-%d')} by {author}"
+            )
+        new_text = "\n".join(new_lines)
+        chunks.append({
+            "text":        new_text,
+            "context":     f"[Wiki Metadata | Newest Pages]\n\n{new_text}",
+            "page_title":  "Newest Wiki Pages",
+            "page_path":   "_meta/newest",
+            "page_url":    wiki_url,
+            "section":     "Newest Pages",
+            "meta_type":   "newest",
+        })
+
+    # Page listing chunk (all pages with paths, for "what pages exist" questions)
+    listing_lines = [f"Complete list of all {total_pages} public wiki pages:"]
+    for p in sorted(pages, key=lambda x: x.get("path", "")):
+        title = p.get("title") or "Untitled"
+        path = p.get("path") or ""
+        listing_lines.append(f"  - {title} ({path})")
+    listing_text = "\n".join(listing_lines)
+    chunks.append({
+        "text":        listing_text,
+        "context":     f"[Wiki Metadata | Page Listing]\n\n{listing_text}",
+        "page_title":  "All Wiki Pages",
+        "page_path":   "_meta/pages",
+        "page_url":    wiki_url,
+        "section":     "Page Listing",
+        "meta_type":   "page_listing",
+    })
+
+    return chunks
+
+
+# ---------------------------------------------------------------------------
 # Main ingestion loop
 # ---------------------------------------------------------------------------
 
@@ -192,6 +380,7 @@ def run() -> None:
 
         total = len(pages)
         ok = skipped = unchanged = errors = 0
+        collected_tags: Counter[str] = Counter()
 
         for i, meta in enumerate(pages, 1):
             page_id = meta["id"]
@@ -218,6 +407,10 @@ def run() -> None:
                 logger.debug("  Page %d has no content, skipping.", page_id)
                 skipped += 1
                 continue
+
+            for t in page.get("tags") or []:
+                tag = t["tag"] if isinstance(t, dict) else t
+                collected_tags[tag] += 1
 
             content_type = (page.get("contentType") or "markdown").lower()
             chunks = chunk_page(
@@ -256,11 +449,42 @@ def run() -> None:
             if page_delay > 0:
                 time.sleep(page_delay)
 
+    # --- Ingest wiki-level metadata ---
+    logger.info("Building wiki metadata chunks…")
+    meta_chunks = _build_wiki_metadata(pages, wiki_url, all_tags=collected_tags)
+    if meta_chunks:
+        meta_texts = [mc["text"] for mc in meta_chunks]
+        try:
+            meta_vectors = embedder.encode(meta_texts, batch_size=batch_size)
+            meta_payloads = [
+                {
+                    "text":               mc["text"],
+                    "context":            mc["context"],
+                    "page_title":         mc["page_title"],
+                    "page_path":          mc["page_path"],
+                    "page_url":           mc["page_url"],
+                    "section":            mc["section"],
+                    "meta_type":          mc["meta_type"],
+                    "tags":               [],
+                    "updated_at":         datetime.utcnow().isoformat() + "Z",
+                    "description":        "",
+                    "section_breadcrumb": "",
+                    "content_hash":       "",
+                    "chunk_index":        0,
+                    "total_chunks":       len(meta_chunks),
+                }
+                for mc in meta_chunks
+            ]
+            store.upsert_meta_chunks(meta_vectors, meta_payloads)
+        except Exception as exc:
+            logger.error("Failed to ingest wiki metadata: %s", exc)
+
     info = store.collection_info()
     logger.info(
         "Done.  pages_ingested=%d  unchanged=%d  skipped=%d  errors=%d  | "
-        "collection='%s'  total_chunks=%s",
+        "metadata_chunks=%d  collection='%s'  total_chunks=%s",
         ok, unchanged, skipped, errors,
+        len(meta_chunks) if meta_chunks else 0,
         info["name"], info["vectors_count"],
     )
 

@@ -91,6 +91,12 @@ Ingestion is **incremental** – only pages whose `updatedAt` timestamp has
 changed are re-fetched and re-embedded.  Set `FORCE_REINGEST=true` to
 override this and re-ingest everything.
 
+After page ingestion, wiki-level **metadata chunks** are automatically
+generated and stored — page count, contributors, tags, recently updated
+pages, newest/oldest pages, and a full page listing.  This lets a chatbot
+answer questions like "how many pages does the wiki have?" or "who are the
+top contributors?" without needing a separate data source.
+
 ### Ollama embedding models
 
 | Model | Dimensions | Notes |
@@ -208,6 +214,8 @@ for hit in results:
 | `next_chunk_id`      | str \| null  | UUID of the next chunk (null for last)                |
 | `parent_chunk_index` | int          | Index of the parent chunk group                       |
 | `total_chunks`       | int          | Total chunks in the page                              |
+| `is_meta`            | str \| null  | `"true"` for wiki metadata chunks, absent for regular |
+| `meta_type`          | str \| null  | Metadata category: `overview`, `contributors`, `tags`, `recent`, `newest`, `page_listing` |
 
 ### Chatbot integration tips
 
@@ -235,6 +243,12 @@ for hit in results:
 - **Deduplicate results**: if multiple pages share boilerplate text, several
   top-k results may be near-identical.  Group results by `content_hash` and
   keep only the best-scoring hit per hash before sending context to the LLM.
+
+- **Wiki metadata questions**: questions like "how many pages?", "who are the
+  contributors?", or "what was recently updated?" are answered by the metadata
+  chunks (where `is_meta` = `"true"`).  These are embedded alongside regular
+  content so semantic search finds them naturally — no special query filter
+  needed.
 
 ---
 

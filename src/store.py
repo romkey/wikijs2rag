@@ -73,6 +73,7 @@ class VectorStore:
             "tags":         PayloadSchemaType.KEYWORD,
             "page_path":    PayloadSchemaType.KEYWORD,
             "content_hash": PayloadSchemaType.KEYWORD,
+            "is_meta":      PayloadSchemaType.KEYWORD,
         }
         for field_name, schema_type in index_fields.items():
             try:
@@ -143,6 +144,39 @@ class VectorStore:
 
         self._client.upsert(collection_name=self._collection, points=points)
         logger.info("Stored %d chunks for page %d", len(points), page_id)
+
+    def upsert_meta_chunks(
+        self,
+        vectors: list[list[float]],
+        payloads: list[dict],
+    ) -> None:
+        """
+        Replace all wiki metadata chunks (is_meta=true) with new ones.
+
+        Metadata chunks have page_id=0 so they don't collide with real pages.
+        """
+        # Delete old meta chunks
+        try:
+            self._client.delete(
+                collection_name=self._collection,
+                points_selector=Filter(
+                    must=[FieldCondition(key="is_meta", match=MatchValue(value="true"))]
+                ),
+            )
+        except UnexpectedResponse:
+            pass
+
+        points = [
+            PointStruct(
+                id=str(uuid.uuid4()),
+                vector=vec,
+                payload={**payload, "page_id": 0, "is_meta": "true"},
+            )
+            for vec, payload in zip(vectors, payloads)
+        ]
+
+        self._client.upsert(collection_name=self._collection, points=points)
+        logger.info("Stored %d wiki metadata chunks", len(points))
 
     def collection_info(self) -> dict:
         info = self._client.get_collection(self._collection)
