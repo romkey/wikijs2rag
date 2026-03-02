@@ -32,9 +32,7 @@ query {
       isPublished
       isPrivate
       contentType
-      createdAt
       updatedAt
-      authorName
     }
   }
 }
@@ -53,6 +51,7 @@ query GetPage($id: Int!) {
       tags {
         tag
       }
+      authorName
       createdAt
       updatedAt
     }

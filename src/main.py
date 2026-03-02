@@ -157,6 +157,7 @@ def _build_wiki_metadata(
     pages: list[dict],
     wiki_url: str,
     all_tags: Counter | None = None,
+    page_extra: dict | None = None,
 ) -> list[dict]:
     """
     Derive wiki-level metadata from the page list.
@@ -164,13 +165,32 @@ def _build_wiki_metadata(
     *all_tags* is a Counter of tag→count collected during page ingestion
     (since the list query doesn't include tags).
 
+    *page_extra* maps page_id → dict with keys like ``authorName`` and
+    ``createdAt`` gathered from individual get_page calls (these fields
+    aren't available on the list query).
+
     Returns a list of metadata chunk dicts, each with a 'text' field suitable
     for embedding and a 'context' field for LLM grounding.
     """
+    if page_extra is None:
+        page_extra = {}
+
+    # Merge per-page details into the list entries
+    for p in pages:
+        extra = page_extra.get(p["id"], {})
+        if "authorName" not in p and "authorName" in extra:
+            p["authorName"] = extra["authorName"]
+        if "createdAt" not in p and "createdAt" in extra:
+            p["createdAt"] = extra["createdAt"]
+
     total_pages = len(pages)
 
-    # Contributors
-    authors = Counter(p.get("authorName") or "Unknown" for p in pages)
+    # Contributors (only counted for pages we actually fetched details for)
+    authors = Counter(
+        p.get("authorName")
+        for p in pages
+        if p.get("authorName")
+    )
     num_contributors = len(authors)
     top_contributors = authors.most_common(10)
 
@@ -280,10 +300,11 @@ def _build_wiki_metadata(
         recent_lines = ["Recently updated wiki pages:"]
         for p, dt in recently_updated:
             title = p.get("title") or p.get("path") or "Untitled"
-            author = p.get("authorName") or "Unknown"
-            recent_lines.append(
-                f"  - \"{title}\" updated on {dt.strftime('%Y-%m-%d')} by {author}"
-            )
+            author = p.get("authorName") or ""
+            line = f"  - \"{title}\" updated on {dt.strftime('%Y-%m-%d')}"
+            if author:
+                line += f" by {author}"
+            recent_lines.append(line)
         recent_text = "\n".join(recent_lines)
         chunks.append({
             "text":        recent_text,
@@ -300,10 +321,11 @@ def _build_wiki_metadata(
         new_lines = ["Newest wiki pages (most recently created):"]
         for p, dt in newest_pages:
             title = p.get("title") or p.get("path") or "Untitled"
-            author = p.get("authorName") or "Unknown"
-            new_lines.append(
-                f"  - \"{title}\" created on {dt.strftime('%Y-%m-%d')} by {author}"
-            )
+            author = p.get("authorName") or ""
+            line = f"  - \"{title}\" created on {dt.strftime('%Y-%m-%d')}"
+            if author:
+                line += f" by {author}"
+            new_lines.append(line)
         new_text = "\n".join(new_lines)
         chunks.append({
             "text":        new_text,
@@ -381,6 +403,7 @@ def run() -> None:
         total = len(pages)
         ok = skipped = unchanged = errors = 0
         collected_tags: Counter[str] = Counter()
+        page_extra: dict[int, dict] = {}
 
         for i, meta in enumerate(pages, 1):
             page_id = meta["id"]
@@ -407,6 +430,11 @@ def run() -> None:
                 logger.debug("  Page %d has no content, skipping.", page_id)
                 skipped += 1
                 continue
+
+            page_extra[page_id] = {
+                "authorName": page.get("authorName") or "",
+                "createdAt":  page.get("createdAt") or "",
+            }
 
             for t in page.get("tags") or []:
                 tag = t["tag"] if isinstance(t, dict) else t
@@ -451,7 +479,7 @@ def run() -> None:
 
     # --- Ingest wiki-level metadata ---
     logger.info("Building wiki metadata chunks…")
-    meta_chunks = _build_wiki_metadata(pages, wiki_url, all_tags=collected_tags)
+    meta_chunks = _build_wiki_metadata(pages, wiki_url, all_tags=collected_tags, page_extra=page_extra)
     if meta_chunks:
         meta_texts = [mc["text"] for mc in meta_chunks]
         try:
