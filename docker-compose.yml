@@ -22,8 +22,9 @@ services:
       retries: 10
       start_period: 20s
 
-  # ── wiki2rag ingestion job ────────────────────────────────────────────────
-  # Run with:  docker compose run --rm wiki2rag
+  # ── wiki2rag ingestion service ───────────────────────────────────────────
+  # Runs continuously: ingests, sleeps POLL_INTERVAL_SECONDS, repeats.
+  # One-shot mode:  POLL_INTERVAL_SECONDS=0 docker compose run --rm wiki2rag
   wiki2rag:
     image: ghcr.io/romkey/wikijs2rag:${VERSION:-latest}
     build: &wiki2rag-build
@@ -41,7 +42,7 @@ services:
     depends_on: &wiki2rag-deps
       qdrant:
         condition: service_healthy
-    restart: "no"
+    restart: unless-stopped
 
   # ── query tool ───────────────────────────────────────────────────────────
   # Usage:

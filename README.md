@@ -77,19 +77,26 @@ docker compose up -d qdrant
 Qdrant's REST API is now available at `http://localhost:6333`.
 Browse the built-in dashboard at `http://localhost:6333/dashboard`.
 
-### 3 – Build and run the ingestion
+### 3 – Build and start the ingestion service
 
 ```bash
 docker compose build wiki2rag    # only needed once (or after code changes)
-docker compose run --rm wiki2rag
+docker compose up -d wiki2rag    # runs continuously, polling every hour
+```
+
+The service ingests all pages on startup, then sleeps and re-checks for
+changes every `POLL_INTERVAL_SECONDS` (default **3600** = 1 hour).  Only
+pages whose `updatedAt` timestamp has changed are re-fetched and
+re-embedded, so repeated runs are fast.
+
+For a **one-shot run** (ingest once and exit):
+
+```bash
+POLL_INTERVAL_SECONDS=0 docker compose run --rm wiki2rag
 ```
 
 The image is lightweight (~200 MB) since embeddings are handled by Ollama —
 no ML frameworks or models baked in.
-
-Ingestion is **incremental** – only pages whose `updatedAt` timestamp has
-changed are re-fetched and re-embedded.  Set `FORCE_REINGEST=true` to
-override this and re-ingest everything.
 
 After page ingestion, wiki-level **metadata chunks** are automatically
 generated and stored — page count, contributors, tags, recently updated
@@ -254,38 +261,20 @@ for hit in results:
 
 ## Keeping the data fresh
 
-Ingestion is **incremental** by default – only pages whose `updatedAt`
-timestamp has changed since the last run are re-fetched and re-embedded.
-This makes it practical to run every few hours instead of nightly.
+The service runs **continuously** by default — after each ingestion it
+sleeps for `POLL_INTERVAL_SECONDS` (default 1 hour) then re-checks for
+changes.  Ingestion is incremental, so only pages whose `updatedAt`
+timestamp has changed are re-fetched and re-embedded.
 
-### cron example (every 4 hours)
-
-```cron
-0 */4 * * * cd /opt/wiki2rag && docker compose run --rm wiki2rag >> /var/log/wiki2rag.log 2>&1
-```
-
-### GitHub Actions example
-
-```yaml
-on:
-  schedule:
-    - cron: "0 */4 * * *"
-
-jobs:
-  ingest:
-    runs-on: self-hosted
-    steps:
-      - uses: actions/checkout@v4
-      - run: docker compose run --rm wiki2rag
-        env:
-          WIKI_URL: ${{ secrets.WIKI_URL }}
-          WIKI_API_KEY: ${{ secrets.WIKI_API_KEY }}
+```bash
+# Change the polling interval (e.g. every 30 minutes)
+POLL_INTERVAL_SECONDS=1800 docker compose up -d wiki2rag
 ```
 
 ### Force full re-ingestion
 
 ```bash
-FORCE_REINGEST=true docker compose run --rm wiki2rag
+FORCE_REINGEST=true POLL_INTERVAL_SECONDS=0 docker compose run --rm wiki2rag
 ```
 
 ---

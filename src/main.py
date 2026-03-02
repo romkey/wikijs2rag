@@ -516,9 +516,25 @@ def run() -> None:
         info["name"], info["vectors_count"],
     )
 
-    if errors:
-        sys.exit(2)
+    return errors == 0
 
 
 if __name__ == "__main__":
-    run()
+    interval = int(_env("POLL_INTERVAL_SECONDS", "3600"))
+
+    if interval <= 0:
+        # One-shot mode (e.g. `docker compose run --rm wiki2rag`)
+        if not run():
+            sys.exit(2)
+    else:
+        logger.info("Running in continuous mode (poll every %d s).", interval)
+        while True:
+            try:
+                run()
+            except SystemExit:
+                raise
+            except Exception:
+                logger.exception("Unexpected error during ingestion run.")
+
+            logger.info("Sleeping %d s until next poll…", interval)
+            time.sleep(interval)
