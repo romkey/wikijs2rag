@@ -91,8 +91,9 @@ def main() -> None:
               QDRANT_HOST        default: localhost
               QDRANT_PORT        default: 6333
               QDRANT_COLLECTION  default: wiki
-              EMBEDDING_BACKEND  default: local
+              EMBEDDING_BACKEND  default: local  (local, ollama, openai)
               EMBEDDING_MODEL    default: BAAI/bge-small-en-v1.5
+              OLLAMA_URL         default: http://localhost:11434
         """),
     )
     parser.add_argument("query", nargs="+", help="Search query text")

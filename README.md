@@ -249,6 +249,42 @@ FORCE_REINGEST=true docker compose run --rm wiki2rag
 
 ---
 
+## Using Ollama for embeddings
+
+If you're already running [Ollama](https://ollama.com/) locally, you can use
+it for embeddings instead of the built-in fastembed model.  No extra Python
+packages are needed — the Ollama backend talks to Ollama's HTTP API directly.
+
+```bash
+# Pull an embedding model in Ollama first
+ollama pull nomic-embed-text
+```
+
+```dotenv
+EMBEDDING_BACKEND=ollama
+EMBEDDING_MODEL=nomic-embed-text
+OLLAMA_URL=http://host.docker.internal:11434
+```
+
+> `host.docker.internal` resolves to the host machine from inside Docker
+> containers on macOS and Windows.  On Linux, use `--add-host=host.docker.internal:host-gateway`
+> or set `OLLAMA_URL` to the actual LAN IP.
+
+Popular Ollama embedding models:
+
+| Model | Dimensions | Notes |
+|---|---|---|
+| `nomic-embed-text` | 768 | Good balance of speed and quality (default) |
+| `all-minilm` | 384 | Fast, small |
+| `mxbai-embed-large` | 1024 | Highest quality |
+| `snowflake-arctic-embed` | 1024 | Strong retrieval performance |
+
+No rebuild needed — just change `.env` and re-run ingestion with
+`FORCE_REINGEST=true` (different model = different vectors).
+
+> **Note:** Change the collection name when switching embedding models –
+> vector dimensions differ and the old collection cannot be reused.
+
 ## Switching to OpenAI embeddings
 
 ```dotenv
@@ -257,10 +293,10 @@ EMBEDDING_MODEL=text-embedding-3-small
 OPENAI_API_KEY=sk-...
 ```
 
-Then rebuild: `docker compose build wiki2rag`.
+No rebuild needed — just change `.env` and re-run ingestion.
 
-> **Note:** Change the collection name if you switch models – vector dimensions
-> differ and the old collection cannot be reused.
+> **Note:** Change the collection name when switching embedding models –
+> vector dimensions differ and the old collection cannot be reused.
 
 ---
 
@@ -273,7 +309,7 @@ wiki2rag/
 │   ├── query.py         # command-line query tool
 │   ├── wiki_client.py   # Wiki.js GraphQL client (+ HTML scraping fallback)
 │   ├── chunker.py       # structure-aware text chunking
-│   ├── embedder.py      # local (fastembed) or OpenAI embedding backends
+│   ├── embedder.py      # embedding backends (fastembed, Ollama, OpenAI)
 │   ├── store.py         # Qdrant wrapper with payload indexes
 │   └── version.py       # version from VERSION file
 ├── docker-compose.yml
