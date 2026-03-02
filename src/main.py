@@ -17,7 +17,7 @@ import sys
 import time
 import uuid
 from collections import Counter
-from datetime import datetime
+from datetime import UTC, datetime
 
 from chunker import Chunk, chunk_page
 from embedder import build_embedder
@@ -494,7 +494,7 @@ def run() -> None:
                     "section":            mc["section"],
                     "meta_type":          mc["meta_type"],
                     "tags":               [],
-                    "updated_at":         datetime.utcnow().isoformat() + "Z",
+                    "updated_at":         datetime.now(UTC).isoformat(),
                     "description":        "",
                     "section_breadcrumb": "",
                     "content_hash":       "",
