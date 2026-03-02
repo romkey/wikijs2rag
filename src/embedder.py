@@ -5,7 +5,7 @@ Supports two backends selected by the EMBEDDING_BACKEND env var:
 
   local  – fastembed (ONNX Runtime, no PyTorch required).  Fast to install,
             small image.  Set EMBEDDING_MODEL to any model name listed by
-            fastembed.list_supported_models().  Default: all-MiniLM-L6-v2.
+            fastembed.list_supported_models().  Default: BAAI/bge-small-en-v1.5.
 
   openai – OpenAI Embeddings API.
             Requires OPENAI_API_KEY.  Set EMBEDDING_MODEL to e.g.

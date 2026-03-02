@@ -10,16 +10,16 @@ Ingests all **public** pages from a [Wiki.js](https://js.wiki/) instance into a
 Wiki.js GraphQL API
       │
       ▼
-  wiki_client.py   ← lists published, non-private pages
+  wiki_client.py   ← lists published, non-private pages (+ HTML scraping fallback)
       │
       ▼
-   chunker.py      ← splits markdown/HTML by headers then by word window
+   chunker.py      ← structure-aware splitting: headers → tables/lists → word window
       │
       ▼
-   embedder.py     ← encodes chunks (local sentence-transformers or OpenAI)
+   embedder.py     ← encodes chunks (local fastembed/ONNX or OpenAI)
       │
       ▼
-    store.py       ← upserts into Qdrant (deletes stale chunks first)
+    store.py       ← upserts into Qdrant with payload indexes
 ```
 
 Qdrant persists the vectors in a named Docker volume.  Any application that
@@ -45,11 +45,13 @@ $EDITOR .env          # set WIKI_URL at minimum
 
 **Optional but common:**
 
-| Variable        | Default              | Description                                |
-|-----------------|----------------------|--------------------------------------------|
-| `WIKI_API_KEY`  | *(empty)*            | API key if the wiki requires auth           |
-| `QDRANT_COLLECTION` | `wiki`           | Collection name (one per wiki is sensible)  |
-| `EMBEDDING_MODEL` | `all-MiniLM-L6-v2` | Any sentence-transformers model name       |
+| Variable             | Default                  | Description                                |
+|----------------------|--------------------------|--------------------------------------------|
+| `WIKI_API_KEY`       | *(empty)*                | API key if the wiki requires auth          |
+| `QDRANT_COLLECTION`  | `wiki`                   | Collection name (one per wiki is sensible) |
+| `EMBEDDING_MODEL`    | `BAAI/bge-small-en-v1.5` | Any fastembed-supported model name        |
+| `CHUNK_SIZE`         | `256`                    | Max words per chunk                        |
+| `FORCE_REINGEST`     | `false`                  | Set `true` to re-ingest unchanged pages    |
 
 See `.env.example` for the full list.
 
@@ -69,11 +71,12 @@ docker compose build wiki2rag    # only needed once (or after code changes)
 docker compose run --rm wiki2rag
 ```
 
-The first build downloads the embedding model and bakes it into the image
-(~500 MB with `all-MiniLM-L6-v2`).  Subsequent runs start in seconds.
+The first build downloads the embedding model and bakes it into the image.
+Subsequent runs start in seconds.
 
-The script is idempotent – re-running it refreshes changed pages and removes
-stale chunks.
+Ingestion is **incremental** – only pages whose `updatedAt` timestamp has
+changed are re-fetched and re-embedded.  Set `FORCE_REINGEST=true` to
+override this and re-ingest everything.
 
 ---
 
@@ -131,53 +134,93 @@ Any language/framework with a Qdrant client can query the store directly.
 **Python example:**
 
 ```python
+from fastembed import TextEmbedding
 from qdrant_client import QdrantClient
-from sentence_transformers import SentenceTransformer
 
 client = QdrantClient(host="localhost", port=6333)
-model  = SentenceTransformer("all-MiniLM-L6-v2")
+model  = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
 
-query_vector = model.encode("How do I reset my password?", normalize_embeddings=True).tolist()
+query_vector = list(model.embed(["How do I reset my password?"]))[0].tolist()
 
-results = client.search(
+results = client.query_points(
     collection_name="wiki",
-    query_vector=query_vector,
+    query=query_vector,
     limit=5,
     with_payload=True,
-)
+).points
 
 for hit in results:
-    print(hit.score, hit.payload["page_title"], hit.payload["page_url"])
-    print(hit.payload["text"][:300])
+    p = hit.payload
+    print(f"{hit.score:.3f}  {p['page_title']}  {p['page_url']}")
+    # Use p["context"] for LLM grounding – it includes title, section, description
+    print(p["context"][:300])
     print()
 ```
 
-**Payload fields on every point:**
+### Payload fields on every point
 
-| Field         | Type        | Description                              |
-|---------------|-------------|------------------------------------------|
-| `page_id`     | int         | Wiki.js page ID                          |
-| `page_title`  | str         | Page title                               |
-| `page_path`   | str         | Wiki-relative path, e.g. `/guides/setup` |
-| `page_url`    | str         | Full URL                                 |
-| `description` | str         | Page description / excerpt               |
-| `tags`        | list[str]   | Wiki.js tags                             |
-| `updated_at`  | str         | ISO-8601 last-modified timestamp         |
-| `section`     | str         | Nearest header above this chunk          |
-| `chunk_index` | int         | Position within the page                 |
-| `text`        | str         | Raw chunk text (for display / re-ranking)|
+| Field                | Type         | Description                                           |
+|----------------------|--------------|-------------------------------------------------------|
+| `page_id`            | int          | Wiki.js page ID                                       |
+| `page_title`         | str          | Page title                                            |
+| `page_path`          | str          | Wiki-relative path, e.g. `guides/setup`               |
+| `page_url`           | str          | Full URL                                              |
+| `description`        | str          | Page description / excerpt                            |
+| `tags`               | list[str]    | Wiki.js tags                                          |
+| `updated_at`         | str          | ISO-8601 last-modified timestamp                      |
+| `section`            | str          | Nearest header above this chunk                       |
+| `section_breadcrumb` | str          | Full header path, e.g. `"Setup > Docker > Compose"`   |
+| `chunk_index`        | int          | Position within the page                              |
+| `chunk_id`           | str          | Unique UUID for this chunk                            |
+| `text`               | str          | Raw chunk text (for embedding / display)              |
+| `context`            | str          | Enriched text with title+section+description for LLMs |
+| `content_hash`       | str          | SHA-256 prefix for deduplication                      |
+| `prev_chunk_id`      | str \| null  | UUID of the previous chunk (null for first)           |
+| `next_chunk_id`      | str \| null  | UUID of the next chunk (null for last)                |
+| `parent_chunk_index` | int          | Index of the parent chunk group                       |
+| `total_chunks`       | int          | Total chunks in the page                              |
+
+### Chatbot integration tips
+
+- **Use `context` for LLM grounding**, not `text`.  The `context` field includes
+  the page title, description, and section breadcrumb, giving the LLM enough
+  surrounding information to produce accurate answers.
+
+- **Filter by tags** for scoped search.  If your wiki tags pages by topic
+  (e.g. "safety", "events", "membership"), pass a Qdrant filter to constrain
+  results:
+  ```python
+  from qdrant_client.models import Filter, FieldCondition, MatchValue
+  results = client.query_points(
+      collection_name="wiki",
+      query=query_vector,
+      query_filter=Filter(must=[
+          FieldCondition(key="tags", match=MatchValue(value="safety"))
+      ]),
+      ...
+  )
+  ```
+
+- **Small-to-big retrieval**: search returns small, focused chunks.  Use
+  `parent_chunk_index` to fetch all sibling chunks for broader context, or
+  follow `prev_chunk_id` / `next_chunk_id` to expand the window.
+
+- **Deduplicate results**: if multiple pages share boilerplate text, several
+  top-k results may be near-identical.  Group results by `content_hash` and
+  keep only the best-scoring hit per hash before sending context to the LLM.
 
 ---
 
 ## Keeping the data fresh
 
-The ingestion job is intentionally **one-shot** – run it on a schedule to keep
-Qdrant up to date.
+Ingestion is **incremental** by default – only pages whose `updatedAt`
+timestamp has changed since the last run are re-fetched and re-embedded.
+This makes it practical to run every few hours instead of nightly.
 
-### cron example (every night at 02:00)
+### cron example (every 4 hours)
 
 ```cron
-0 2 * * * cd /opt/wiki2rag && docker compose run --rm wiki2rag >> /var/log/wiki2rag.log 2>&1
+0 */4 * * * cd /opt/wiki2rag && docker compose run --rm wiki2rag >> /var/log/wiki2rag.log 2>&1
 ```
 
 ### GitHub Actions example
@@ -185,7 +228,7 @@ Qdrant up to date.
 ```yaml
 on:
   schedule:
-    - cron: "0 2 * * *"
+    - cron: "0 */4 * * *"
 
 jobs:
   ingest:
@@ -196,6 +239,12 @@ jobs:
         env:
           WIKI_URL: ${{ secrets.WIKI_URL }}
           WIKI_API_KEY: ${{ secrets.WIKI_API_KEY }}
+```
+
+### Force full re-ingestion
+
+```bash
+FORCE_REINGEST=true docker compose run --rm wiki2rag
 ```
 
 ---
@@ -223,12 +272,14 @@ wiki2rag/
 │   ├── main.py          # ingestion entry point / orchestration
 │   ├── query.py         # command-line query tool
 │   ├── wiki_client.py   # Wiki.js GraphQL client (+ HTML scraping fallback)
-│   ├── chunker.py       # markdown/HTML → overlapping text chunks
-│   ├── embedder.py      # local or OpenAI embedding backends
-│   └── store.py         # Qdrant wrapper
+│   ├── chunker.py       # structure-aware text chunking
+│   ├── embedder.py      # local (fastembed) or OpenAI embedding backends
+│   ├── store.py         # Qdrant wrapper with payload indexes
+│   └── version.py       # version from VERSION file
 ├── docker-compose.yml
 ├── Dockerfile
 ├── requirements.txt
+├── VERSION
 └── .env.example
 ```
 

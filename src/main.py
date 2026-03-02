@@ -3,14 +3,21 @@ wiki2rag – ingest Wiki.js public pages into a Qdrant vector store.
 
 All configuration is via environment variables (see .env.example).
 Run once manually, on a schedule, or via `docker compose run wiki2rag`.
+
+Features:
+  - Incremental ingestion: skips pages whose updatedAt hasn't changed
+  - Enriched context per chunk for LLM grounding
+  - Parent/prev/next chunk references for small-to-big retrieval
+  - Content hash per chunk for deduplication
 """
 
 import logging
 import os
 import sys
 import time
+import uuid
 
-from chunker import chunk_page
+from chunker import Chunk, chunk_page
 from embedder import build_embedder
 from store import VectorStore
 from version import __version__
@@ -44,25 +51,121 @@ def _env(name: str, default: str) -> str:
     return os.environ.get(name, default).strip() or default
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    val = os.environ.get(name, "").strip().lower()
+    if not val:
+        return default
+    return val in ("1", "true", "yes")
+
+
+# ---------------------------------------------------------------------------
+# Context builder
+# ---------------------------------------------------------------------------
+
+def _build_context(
+    chunk: Chunk,
+    page_title: str,
+    page_description: str,
+) -> str:
+    """
+    Build an enriched context string for LLM consumption.
+
+    Includes page title, description, and section breadcrumb so the LLM
+    knows *where* this chunk comes from without the chatbot needing to
+    reconstruct that from individual payload fields.
+    """
+    parts: list[str] = []
+
+    if page_title:
+        parts.append(f"Page: {page_title}")
+
+    if page_description:
+        parts.append(f"Summary: {page_description}")
+
+    if chunk.section_breadcrumb:
+        parts.append(f"Section: {chunk.section_breadcrumb}")
+
+    if parts:
+        header = " | ".join(parts)
+        return f"[{header}]\n\n{chunk.text}"
+    else:
+        return chunk.text
+
+
+# ---------------------------------------------------------------------------
+# Payload builder with parent/prev/next references
+# ---------------------------------------------------------------------------
+
+def _build_payloads(
+    chunks: list[Chunk],
+    page: dict,
+    page_url: str,
+    parent_chunk_size: int,
+) -> list[dict]:
+    """
+    Build payload dicts for each chunk.
+
+    Assigns stable UUIDs per chunk and cross-references:
+      - prev_chunk_id / next_chunk_id  for sequential traversal
+      - parent_chunk_index             index of the "parent" chunk in a
+                                       coarser-grained view (every Nth chunk)
+    """
+    page_title = page.get("title") or ""
+    page_description = page.get("description") or ""
+    tags = [t["tag"] for t in (page.get("tags") or [])]
+    updated_at = page.get("updatedAt") or ""
+
+    chunk_ids = [str(uuid.uuid4()) for _ in chunks]
+
+    payloads: list[dict] = []
+    for i, chunk in enumerate(chunks):
+        context = _build_context(chunk, page_title, page_description)
+
+        parent_idx = (i // parent_chunk_size) * parent_chunk_size
+
+        payload = {
+            "chunk_id":           chunk_ids[i],
+            "text":               chunk.text,
+            "context":            context,
+            "chunk_index":        chunk.chunk_index,
+            "section":            chunk.section,
+            "section_breadcrumb": chunk.section_breadcrumb,
+            "content_hash":       chunk.content_hash,
+            "page_path":          page["path"],
+            "page_title":         page_title,
+            "page_url":           page_url,
+            "description":        page_description,
+            "tags":               tags,
+            "updated_at":         updated_at,
+            "prev_chunk_id":      chunk_ids[i - 1] if i > 0 else None,
+            "next_chunk_id":      chunk_ids[i + 1] if i < len(chunks) - 1 else None,
+            "parent_chunk_index": parent_idx,
+            "total_chunks":       len(chunks),
+        }
+        payloads.append(payload)
+
+    return payloads
+
+
 # ---------------------------------------------------------------------------
 # Main ingestion loop
 # ---------------------------------------------------------------------------
 
 def run() -> None:
-    wiki_url    = _require_env("WIKI_URL")
-    api_key     = os.environ.get("WIKI_API_KEY", "").strip() or None
-    qdrant_host = _env("QDRANT_HOST", "qdrant")
-    qdrant_port = int(_env("QDRANT_PORT", "6333"))
-    collection  = _env("QDRANT_COLLECTION", "wiki")
-    chunk_size  = int(_env("CHUNK_SIZE", "512"))
-    chunk_overlap = int(_env("CHUNK_OVERLAP", "64"))
-    batch_size  = int(_env("EMBEDDING_BATCH_SIZE", "32"))
-    page_delay  = float(_env("PAGE_DELAY_SECONDS", "0.1"))
+    wiki_url       = _require_env("WIKI_URL")
+    api_key        = os.environ.get("WIKI_API_KEY", "").strip() or None
+    qdrant_host    = _env("QDRANT_HOST", "qdrant")
+    qdrant_port    = int(_env("QDRANT_PORT", "6333"))
+    collection     = _env("QDRANT_COLLECTION", "wiki")
+    chunk_size     = int(_env("CHUNK_SIZE", "256"))
+    chunk_overlap  = int(_env("CHUNK_OVERLAP", "50"))
+    batch_size     = int(_env("EMBEDDING_BATCH_SIZE", "32"))
+    page_delay     = float(_env("PAGE_DELAY_SECONDS", "0.1"))
+    force_reingest = _env_bool("FORCE_REINGEST", False)
+    parent_ratio   = int(_env("PARENT_CHUNK_RATIO", "4"))
 
-    # Build embedder (may download a model – this is the slow part)
     embedder = build_embedder()
 
-    # Connect to Qdrant (retry a few times in case Qdrant is still starting)
     logger.info("Connecting to Qdrant at %s:%d …", qdrant_host, qdrant_port)
     for attempt in range(1, 7):
         try:
@@ -88,16 +191,23 @@ def run() -> None:
             return
 
         total = len(pages)
-        ok = skipped = errors = 0
+        ok = skipped = unchanged = errors = 0
 
         for i, meta in enumerate(pages, 1):
             page_id = meta["id"]
             title   = meta.get("title") or meta.get("path") or str(page_id)
             logger.info("[%d/%d] Processing page %d: %s", i, total, page_id, title)
 
+            # --- Incremental: skip if updatedAt hasn't changed ---
+            if not force_reingest:
+                stored_ts = store.get_page_updated_at(page_id)
+                wiki_ts = meta.get("updatedAt") or ""
+                if stored_ts and wiki_ts and stored_ts == wiki_ts:
+                    logger.debug("  Page %d unchanged (updatedAt=%s), skipping.", page_id, wiki_ts)
+                    unchanged += 1
+                    continue
+
             try:
-                # Pass meta so get_page() can fall back to HTML scraping
-                # if the GraphQL API returns a 6013 (PageViewForbidden) error.
                 page = wiki.get_page(page_id, meta=meta)
             except WikiClientError as exc:
                 logger.error("  Could not fetch page %d: %s", page_id, exc)
@@ -115,6 +225,8 @@ def run() -> None:
                 content_type=content_type,
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
+                page_title=page.get("title") or "",
+                page_description=page.get("description") or "",
             )
 
             if not chunks:
@@ -131,20 +243,7 @@ def run() -> None:
                 continue
 
             page_url = f"{wiki_url.rstrip('/')}/{page['path'].lstrip('/')}"
-            payloads = [
-                {
-                    "text":        chunk.text,
-                    "chunk_index": chunk.chunk_index,
-                    "section":     chunk.section,
-                    "page_path":   page["path"],
-                    "page_title":  page["title"] or "",
-                    "page_url":    page_url,
-                    "description": page.get("description") or "",
-                    "tags":        [t["tag"] for t in (page.get("tags") or [])],
-                    "updated_at":  page.get("updatedAt") or "",
-                }
-                for chunk in chunks
-            ]
+            payloads = _build_payloads(chunks, page, page_url, parent_ratio)
 
             try:
                 store.upsert_page_chunks(page_id, vectors, payloads)
@@ -159,9 +258,9 @@ def run() -> None:
 
     info = store.collection_info()
     logger.info(
-        "Done.  pages_ok=%d  skipped=%d  errors=%d  | "
+        "Done.  pages_ingested=%d  unchanged=%d  skipped=%d  errors=%d  | "
         "collection='%s'  total_chunks=%s",
-        ok, skipped, errors,
+        ok, unchanged, skipped, errors,
         info["name"], info["vectors_count"],
     )
 

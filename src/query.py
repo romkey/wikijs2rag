@@ -92,7 +92,7 @@ def main() -> None:
               QDRANT_PORT        default: 6333
               QDRANT_COLLECTION  default: wiki
               EMBEDDING_BACKEND  default: local
-              EMBEDDING_MODEL    default: all-MiniLM-L6-v2
+              EMBEDDING_MODEL    default: BAAI/bge-small-en-v1.5
         """),
     )
     parser.add_argument("query", nargs="+", help="Search query text")
@@ -176,7 +176,7 @@ def main() -> None:
     # ── Print results ─────────────────────────────────────────────────────────
     print()
     print(f"  {bold('Query:')} {query_text}")
-    model_name = os.environ.get("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
+    model_name = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
     print(f"  {dim(f'collection={args.collection}  model={model_name}  v{__version__}')}")
     print()
 

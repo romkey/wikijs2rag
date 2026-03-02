@@ -6,13 +6,13 @@ Re-running the ingestion for a page first deletes its old points so the
 collection stays consistent (no stale chunks after a page is edited or
 deleted).
 
-The collection is created automatically on first use with COSINE distance,
-which pairs well with normalized embeddings from sentence-transformers and
-OpenAI.
+Payload indexes are created on filterable fields (page_id, tags, page_path,
+content_hash) so that filtered vector search and delete-by-filter are fast.
 """
 
 import logging
 import uuid
+from typing import Optional
 
 from qdrant_client import QdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
@@ -21,7 +21,9 @@ from qdrant_client.models import (
     FieldCondition,
     Filter,
     MatchValue,
+    PayloadSchemaType,
     PointStruct,
+    ScrollResult,
     VectorParams,
 )
 
@@ -47,6 +49,7 @@ class VectorStore:
         self._collection = collection
         self._vector_size = vector_size
         self._ensure_collection()
+        self._ensure_indexes()
 
     # ------------------------------------------------------------------
     # Internals
@@ -66,6 +69,24 @@ class VectorStore:
         else:
             logger.debug("Using existing Qdrant collection '%s'", self._collection)
 
+    def _ensure_indexes(self) -> None:
+        """Create payload field indexes for efficient filtering."""
+        index_fields = {
+            "page_id":      PayloadSchemaType.INTEGER,
+            "tags":         PayloadSchemaType.KEYWORD,
+            "page_path":    PayloadSchemaType.KEYWORD,
+            "content_hash": PayloadSchemaType.KEYWORD,
+        }
+        for field_name, schema_type in index_fields.items():
+            try:
+                self._client.create_payload_index(
+                    collection_name=self._collection,
+                    field_name=field_name,
+                    field_schema=schema_type,
+                )
+            except UnexpectedResponse:
+                pass  # index already exists
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -82,6 +103,25 @@ class VectorStore:
         except UnexpectedResponse as exc:
             logger.warning("Could not delete page %d chunks: %s", page_id, exc)
 
+    def get_page_updated_at(self, page_id: int) -> Optional[str]:
+        """Return the updated_at value for the first stored chunk of *page_id*, or None."""
+        try:
+            result: ScrollResult = self._client.scroll(
+                collection_name=self._collection,
+                scroll_filter=Filter(
+                    must=[FieldCondition(key="page_id", match=MatchValue(value=page_id))]
+                ),
+                limit=1,
+                with_payload=["updated_at"],
+                with_vectors=False,
+            )
+            points = result[0] if isinstance(result, tuple) else result.points
+            if points:
+                return points[0].payload.get("updated_at")
+        except Exception:
+            pass
+        return None
+
     def upsert_page_chunks(
         self,
         page_id: int,
@@ -90,12 +130,6 @@ class VectorStore:
     ) -> None:
         """
         Replace all stored chunks for *page_id* with the new vectors.
-
-        Args:
-            page_id:  Wiki.js page ID (used to purge stale data first).
-            vectors:  Embedding vectors, one per chunk.
-            payloads: Metadata dicts, one per chunk.  ``page_id`` is
-                      injected automatically.
         """
         assert len(vectors) == len(payloads), "vectors and payloads must have the same length"
 
@@ -115,8 +149,6 @@ class VectorStore:
 
     def collection_info(self) -> dict:
         info = self._client.get_collection(self._collection)
-        # vectors_count was made optional (and removed in some client versions);
-        # fall back to points_count which is always present.
         vectors_count = getattr(info, "vectors_count", None) or getattr(info, "points_count", None)
         return {
             "name": self._collection,
