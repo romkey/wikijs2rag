@@ -62,6 +62,7 @@ $EDITOR .env          # set WIKI_URL and OLLAMA_URL at minimum
 | Variable             | Default              | Description                                |
 |----------------------|----------------------|--------------------------------------------|
 | `WIKI_API_KEY`       | *(empty)*            | API key if the wiki requires auth          |
+| `OLLAMA_API_KEY`     | *(empty)*            | Bearer token for hosted/proxied Ollama APIs |
 | `QDRANT_COLLECTION`  | `wiki`               | Collection name (one per wiki is sensible) |
 | `CHUNK_SIZE`         | `256`                | Max words per chunk                        |
 | `FORCE_REINGEST`     | `false`              | Set `true` to re-ingest unchanged pages    |
@@ -177,7 +178,8 @@ from qdrant_client import QdrantClient
 
 client = QdrantClient(host="localhost", port=6333)
 
-# Get embedding from Ollama
+# Get embedding from Ollama. If your Ollama endpoint needs auth, add:
+# headers={"Authorization": "Bearer <OLLAMA_API_KEY>"}
 resp = httpx.post("http://localhost:11434/api/embed", json={
     "model": "nomic-embed-text",
     "input": ["How do I reset my password?"],

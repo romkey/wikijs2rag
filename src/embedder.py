@@ -2,7 +2,7 @@
 Embedding backend — Ollama.
 
 Talks to Ollama's /api/embed HTTP endpoint using httpx.
-Set OLLAMA_URL and EMBEDDING_MODEL in your environment.
+Set OLLAMA_URL, EMBEDDING_MODEL, and optionally OLLAMA_API_KEY in your environment.
 """
 
 import logging
@@ -23,15 +23,17 @@ class OllamaEmbedder:
         base_url: str = "http://localhost:11434",
         timeout: float = 120.0,
         context_length: int = _DEFAULT_CONTEXT_LENGTH,
+        api_key: str | None = None,
     ):
         self._model_name = model_name
         self._base_url = base_url.rstrip("/")
-        self._client = httpx.Client(timeout=timeout)
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
+        self._client = httpx.Client(headers=headers, timeout=timeout)
         self._context_length = context_length
 
         logger.info(
-            "Connecting to Ollama at %s (model=%s, context_length=%d)…",
-            self._base_url, model_name, context_length,
+            "Connecting to Ollama at %s (model=%s, context_length=%d, auth=%s)…",
+            self._base_url, model_name, context_length, "enabled" if api_key else "disabled",
         )
         probe = self._embed_batch(["dimension probe"])
         self._dim = len(probe[0])
@@ -85,5 +87,6 @@ class OllamaEmbedder:
 def build_embedder() -> OllamaEmbedder:
     model = os.environ.get("EMBEDDING_MODEL", OllamaEmbedder._DEFAULT_MODEL)
     url = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+    api_key = os.environ.get("OLLAMA_API_KEY", "").strip() or None
     ctx = int(os.environ.get("EMBEDDING_CONTEXT_LENGTH", str(OllamaEmbedder._DEFAULT_CONTEXT_LENGTH)))
-    return OllamaEmbedder(model, base_url=url, context_length=ctx)
+    return OllamaEmbedder(model, base_url=url, context_length=ctx, api_key=api_key)
