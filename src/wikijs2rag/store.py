@@ -12,7 +12,7 @@ content_hash) so that filtered vector search and delete-by-filter are fast.
 
 import logging
 import uuid
-from typing import Optional
+from typing import Any
 
 from qdrant_client import QdrantClient
 from qdrant_client.http.exceptions import UnexpectedResponse
@@ -23,7 +23,6 @@ from qdrant_client.models import (
     MatchValue,
     PayloadSchemaType,
     PointStruct,
-    ScrollResult,
     VectorParams,
 )
 
@@ -37,7 +36,7 @@ class VectorStore:
         port: int,
         collection: str,
         vector_size: int,
-    ):
+    ) -> None:
         self._client = QdrantClient(
             host=host,
             port=port,
@@ -69,11 +68,11 @@ class VectorStore:
     def _ensure_indexes(self) -> None:
         """Create payload field indexes for efficient filtering."""
         index_fields = {
-            "page_id":      PayloadSchemaType.INTEGER,
-            "tags":         PayloadSchemaType.KEYWORD,
-            "page_path":    PayloadSchemaType.KEYWORD,
+            "page_id": PayloadSchemaType.INTEGER,
+            "tags": PayloadSchemaType.KEYWORD,
+            "page_path": PayloadSchemaType.KEYWORD,
             "content_hash": PayloadSchemaType.KEYWORD,
-            "is_meta":      PayloadSchemaType.KEYWORD,
+            "is_meta": PayloadSchemaType.KEYWORD,
         }
         for field_name, schema_type in index_fields.items():
             try:
@@ -82,8 +81,8 @@ class VectorStore:
                     field_name=field_name,
                     field_schema=schema_type,
                 )
-            except UnexpectedResponse:
-                pass  # index already exists
+            except UnexpectedResponse as exc:
+                logger.debug("Payload index %s not created (probably exists): %s", field_name, exc)
 
     # ------------------------------------------------------------------
     # Public API
@@ -94,42 +93,39 @@ class VectorStore:
         try:
             self._client.delete(
                 collection_name=self._collection,
-                points_selector=Filter(
-                    must=[FieldCondition(key="page_id", match=MatchValue(value=page_id))]
-                ),
+                points_selector=Filter(must=[FieldCondition(key="page_id", match=MatchValue(value=page_id))]),
             )
         except UnexpectedResponse as exc:
             logger.warning("Could not delete page %d chunks: %s", page_id, exc)
 
-    def get_page_updated_at(self, page_id: int) -> Optional[str]:
+    def get_page_updated_at(self, page_id: int) -> str | None:
         """Return the updated_at value for the first stored chunk of *page_id*, or None."""
         try:
-            result: ScrollResult = self._client.scroll(
+            points, _next = self._client.scroll(
                 collection_name=self._collection,
-                scroll_filter=Filter(
-                    must=[FieldCondition(key="page_id", match=MatchValue(value=page_id))]
-                ),
+                scroll_filter=Filter(must=[FieldCondition(key="page_id", match=MatchValue(value=page_id))]),
                 limit=1,
                 with_payload=["updated_at"],
                 with_vectors=False,
             )
-            points = result[0] if isinstance(result, tuple) else result.points
-            if points:
-                return points[0].payload.get("updated_at")
-        except Exception:
-            pass
+            if points and points[0].payload:
+                value = points[0].payload.get("updated_at")
+                return str(value) if value else None
+        except Exception:  # treat an unreachable or missing index as "not stored"
+            logger.debug("Could not read updated_at for page %d", page_id, exc_info=True)
         return None
 
     def upsert_page_chunks(
         self,
         page_id: int,
         vectors: list[list[float]],
-        payloads: list[dict],
+        payloads: list[dict[str, Any]],  # JSON-like payloads stored as-is
     ) -> None:
         """
         Replace all stored chunks for *page_id* with the new vectors.
         """
-        assert len(vectors) == len(payloads), "vectors and payloads must have the same length"
+        if len(vectors) != len(payloads):
+            raise ValueError(f"{len(vectors)} vectors but {len(payloads)} payloads")
 
         self.delete_page(page_id)
 
@@ -139,7 +135,7 @@ class VectorStore:
                 vector=vec,
                 payload={**payload, "page_id": page_id},
             )
-            for vec, payload in zip(vectors, payloads)
+            for vec, payload in zip(vectors, payloads, strict=True)
         ]
 
         self._client.upsert(collection_name=self._collection, points=points)
@@ -148,7 +144,7 @@ class VectorStore:
     def upsert_meta_chunks(
         self,
         vectors: list[list[float]],
-        payloads: list[dict],
+        payloads: list[dict[str, Any]],  # JSON-like payloads stored as-is
     ) -> None:
         """
         Replace all wiki metadata chunks (is_meta=true) with new ones.
@@ -159,12 +155,10 @@ class VectorStore:
         try:
             self._client.delete(
                 collection_name=self._collection,
-                points_selector=Filter(
-                    must=[FieldCondition(key="is_meta", match=MatchValue(value="true"))]
-                ),
+                points_selector=Filter(must=[FieldCondition(key="is_meta", match=MatchValue(value="true"))]),
             )
-        except UnexpectedResponse:
-            pass
+        except UnexpectedResponse as exc:
+            logger.warning("Could not delete old metadata chunks: %s", exc)
 
         points = [
             PointStruct(
@@ -172,13 +166,13 @@ class VectorStore:
                 vector=vec,
                 payload={**payload, "page_id": 0, "is_meta": "true"},
             )
-            for vec, payload in zip(vectors, payloads)
+            for vec, payload in zip(vectors, payloads, strict=True)
         ]
 
         self._client.upsert(collection_name=self._collection, points=points)
         logger.info("Stored %d wiki metadata chunks", len(points))
 
-    def collection_info(self) -> dict:
+    def collection_info(self) -> dict[str, Any]:  # mixed str/int/None values
         info = self._client.get_collection(self._collection)
         vectors_count = getattr(info, "vectors_count", None) or getattr(info, "points_count", None)
         return {

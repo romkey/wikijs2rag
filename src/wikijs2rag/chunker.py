@@ -5,7 +5,7 @@ Splits markdown/HTML content into retrieval-friendly chunks with:
   - Header-based section splitting (preserves document structure)
   - Atomic block detection (tables, ordered lists, code blocks kept whole)
   - Sliding word-window with overlap for remaining prose
-  - Enriched context string per chunk (title + section breadcrumb) for LLM use
+  - Section breadcrumbs per chunk (ingest.py builds the enriched LLM context)
   - Content hashing for downstream deduplication
 """
 
@@ -28,9 +28,10 @@ class Chunk:
 # Content cleaning
 # ---------------------------------------------------------------------------
 
+
 def _strip_html(text: str) -> str:
     class _Extractor(HTMLParser):
-        def __init__(self):
+        def __init__(self) -> None:
             super().__init__()
             self.parts: list[str] = []
 
@@ -56,6 +57,7 @@ def _clean_markdown(text: str) -> str:
 # Section splitting with breadcrumb tracking
 # ---------------------------------------------------------------------------
 
+
 def _split_by_headers(text: str) -> list[tuple[str, str, str]]:
     """
     Split on markdown headers; returns [(header, body, breadcrumb), ...].
@@ -69,7 +71,6 @@ def _split_by_headers(text: str) -> list[tuple[str, str, str]]:
     # Track headers at each level for breadcrumb
     level_headers: dict[int, str] = {}
     current_header = ""
-    current_level = 0
     current_lines: list[str] = []
 
     def _breadcrumb() -> str:
@@ -89,7 +90,6 @@ def _split_by_headers(text: str) -> list[tuple[str, str, str]]:
             level = len(m.group(1))
             title = m.group(2).strip()
             current_header = title
-            current_level = level
             level_headers[level] = title
             for lvl in list(level_headers):
                 if lvl > level:
@@ -113,12 +113,12 @@ def _split_by_headers(text: str) -> list[tuple[str, str, str]]:
 # ---------------------------------------------------------------------------
 
 _TABLE_RE = re.compile(
-    r"((?:^\|.+\|[ \t]*\n)+)",
+    r"((?:^\|.+\|[ \t]*(?:\n|$))+)",
     re.MULTILINE,
 )
 
 _ORDERED_LIST_RE = re.compile(
-    r"((?:^\d+[.)]\s+.+\n(?:[ \t]+.+\n)*)+)",
+    r"((?:^\d+[.)]\s+.+(?:\n|$)(?:[ \t]+.+(?:\n|$))*)+)",
     re.MULTILINE,
 )
 
@@ -177,6 +177,7 @@ def _extract_atomic_blocks(body: str) -> list[tuple[str, bool]]:
 # Sliding-window word chunker
 # ---------------------------------------------------------------------------
 
+
 def _window_chunks(
     words: list[str],
     chunk_size: int,
@@ -207,13 +208,12 @@ def _content_hash(text: str) -> str:
 # Public API
 # ---------------------------------------------------------------------------
 
+
 def chunk_page(
     content: str,
     content_type: str = "markdown",
     chunk_size: int = 256,
     chunk_overlap: int = 50,
-    page_title: str = "",
-    page_description: str = "",
 ) -> list[Chunk]:
     """
     Split a wiki page's raw content into overlapping text chunks.
@@ -223,8 +223,6 @@ def chunk_page(
         content_type:     ``"markdown"`` or ``"html"`` (case-insensitive).
         chunk_size:       Maximum words per chunk.
         chunk_overlap:    Words shared between consecutive chunks.
-        page_title:       Page title (used to build enriched context).
-        page_description: Page description/excerpt (included in context).
 
     Returns:
         Ordered list of :class:`Chunk` objects.
@@ -246,24 +244,28 @@ def chunk_page(
         for segment_text, is_atomic in segments:
             if is_atomic:
                 chunk_text = f"{prefix}{segment_text}".strip()
-                all_chunks.append(Chunk(
-                    text=chunk_text,
-                    chunk_index=len(all_chunks),
-                    section=header,
-                    section_breadcrumb=breadcrumb,
-                    content_hash=_content_hash(chunk_text),
-                ))
-            else:
-                words = segment_text.split()
-                windows = _window_chunks(words, chunk_size, chunk_overlap)
-                for window_text in windows:
-                    chunk_text = f"{prefix}{window_text}".strip()
-                    all_chunks.append(Chunk(
+                all_chunks.append(
+                    Chunk(
                         text=chunk_text,
                         chunk_index=len(all_chunks),
                         section=header,
                         section_breadcrumb=breadcrumb,
                         content_hash=_content_hash(chunk_text),
-                    ))
+                    )
+                )
+            else:
+                words = segment_text.split()
+                windows = _window_chunks(words, chunk_size, chunk_overlap)
+                for window_text in windows:
+                    chunk_text = f"{prefix}{window_text}".strip()
+                    all_chunks.append(
+                        Chunk(
+                            text=chunk_text,
+                            chunk_index=len(all_chunks),
+                            section=header,
+                            section_breadcrumb=breadcrumb,
+                            content_hash=_content_hash(chunk_text),
+                        )
+                    )
 
     return all_chunks

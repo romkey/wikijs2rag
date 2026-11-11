@@ -1,0 +1,71 @@
+# Production: runs the released image from ghcr.io next to Qdrant.
+# Configure it in .env next to this file (see .env.example and
+# docs/configuration.md). Ollama runs on the host or elsewhere (OLLAMA_URL).
+#
+#   docker compose -f docker-compose.prod.yaml up -d
+#   APP_VERSION=1.2.3 docker compose -f docker-compose.prod.yaml up -d   # pin a release
+#   docker compose -f docker-compose.prod.yaml run --rm query "door code"
+#   docker compose -f docker-compose.prod.yaml build   # build the image locally instead
+
+x-app: &app
+  image: ghcr.io/romkey/wikijs2rag:${APP_VERSION:-latest}
+  build:
+    context: .
+    target: production
+  env_file:
+    - path: .env
+      required: false
+  environment:
+    QDRANT_HOST: qdrant
+  extra_hosts:
+    - "host.docker.internal:host-gateway"  # reach Ollama on the host
+  depends_on:
+    qdrant:
+      condition: service_healthy
+  # Least privilege: nothing to write but /tmp, no capabilities.
+  read_only: true
+  tmpfs:
+    - /tmp
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+
+services:
+  # Ingests on start, then every POLL_INTERVAL_SECONDS. It's a worker with no
+  # port, so there's no /healthz to probe: it exits non-zero if Qdrant or the
+  # wiki is unreachable, and Docker restarts it.
+  app:
+    <<: *app
+    restart: unless-stopped
+
+  # Command-line search; only runs when asked.
+  query:
+    <<: *app
+    profiles: [tools]
+    entrypoint: ["wikijs2rag-query"]
+
+  qdrant:
+    image: qdrant/qdrant:v1.20.0
+    restart: unless-stopped
+    ports:
+      - "${QDRANT_REST_PORT:-6333}:6333"  # REST / dashboard, for your RAG apps
+      - "${QDRANT_GRPC_PORT:-6334}:6334"  # gRPC
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      # The Qdrant image has no curl or wget; probe /readyz with bash's /dev/tcp.
+      test:
+        - CMD
+        - bash
+        - -c
+        - exec 3<>/dev/tcp/127.0.0.1/6333 && printf 'GET /readyz HTTP/1.0\r\n\r\n' >&3 && grep -q '200 OK' <&3
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  qdrant_data:

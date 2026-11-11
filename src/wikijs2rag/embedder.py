@@ -1,12 +1,11 @@
 """
 Embedding backend — Ollama.
 
-Talks to Ollama's /api/embed HTTP endpoint using httpx.
-Set OLLAMA_URL, EMBEDDING_MODEL, and optionally OLLAMA_API_KEY in your environment.
+Talks to Ollama's /api/embed HTTP endpoint using httpx:
+https://github.com/ollama/ollama/blob/main/docs/api.md#generate-embeddings
 """
 
 import logging
-import os
 
 import httpx
 
@@ -24,7 +23,7 @@ class OllamaEmbedder:
         timeout: float = 120.0,
         context_length: int = _DEFAULT_CONTEXT_LENGTH,
         api_key: str | None = None,
-    ):
+    ) -> None:
         self._model_name = model_name
         self._base_url = base_url.rstrip("/")
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
@@ -33,7 +32,10 @@ class OllamaEmbedder:
 
         logger.info(
             "Connecting to Ollama at %s (model=%s, context_length=%d, auth=%s)…",
-            self._base_url, model_name, context_length, "enabled" if api_key else "disabled",
+            self._base_url,
+            model_name,
+            context_length,
+            "enabled" if api_key else "disabled",
         )
         probe = self._embed_batch(["dimension probe"])
         self._dim = len(probe[0])
@@ -43,7 +45,7 @@ class OllamaEmbedder:
         """Truncate text to stay within the model's context window.
 
         Uses a conservative 1 token ≈ 0.75 words heuristic; most sub-word
-        tokenisers average 1.2–1.5 tokens per whitespace-delimited word,
+        tokenisers average 1.2-1.5 tokens per whitespace-delimited word,
         so this leaves headroom.
         """
         max_words = int(self._context_length * 0.75)
@@ -52,7 +54,9 @@ class OllamaEmbedder:
             return text
         logger.warning(
             "Truncating text from %d to %d words (context_length=%d tokens).",
-            len(words), max_words, self._context_length,
+            len(words),
+            max_words,
+            self._context_length,
         )
         return " ".join(words[:max_words])
 
@@ -64,12 +68,12 @@ class OllamaEmbedder:
         resp.raise_for_status()
         data = resp.json()
 
-        if "embeddings" in data:
-            return data["embeddings"]
+        if isinstance(data, dict) and "embeddings" in data:
+            embeddings: list[list[float]] = data["embeddings"]
+            return embeddings
 
         raise RuntimeError(
-            f"Unexpected response from Ollama /api/embed: {list(data.keys())}. "
-            "Make sure you are running Ollama >= 0.1.44."
+            f"Unexpected response from Ollama /api/embed: {list(data)}. Make sure you are running Ollama >= 0.1.44."
         )
 
     @property
@@ -82,11 +86,3 @@ class OllamaEmbedder:
             batch = [self._truncate(t) for t in texts[i : i + batch_size]]
             results.extend(self._embed_batch(batch))
         return results
-
-
-def build_embedder() -> OllamaEmbedder:
-    model = os.environ.get("EMBEDDING_MODEL", OllamaEmbedder._DEFAULT_MODEL)
-    url = os.environ.get("OLLAMA_URL", "http://localhost:11434")
-    api_key = os.environ.get("OLLAMA_API_KEY", "").strip() or None
-    ctx = int(os.environ.get("EMBEDDING_CONTEXT_LENGTH", str(OllamaEmbedder._DEFAULT_CONTEXT_LENGTH)))
-    return OllamaEmbedder(model, base_url=url, context_length=ctx, api_key=api_key)

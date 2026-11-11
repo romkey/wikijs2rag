@@ -1,0 +1,67 @@
+# Development: runs the ingester from your working tree, with the dev
+# dependencies installed, against a local Qdrant. Ollama runs on the host.
+#
+#   cp .env.example .env              # then edit it
+#   docker compose up --build         # Qdrant dashboard: http://localhost:6333/dashboard
+#   docker compose run --rm query "how do I reset my password?"
+#   docker compose run --rm app bash  # a shell with everything installed
+#
+# Restart the app (docker compose restart app) to pick up code changes.
+# Tests, lint and production have their own compose files:
+#
+#   docker compose -f docker-compose.test.yaml run --rm test
+#   docker compose -f docker-compose.lint.yaml run --rm lint
+#   docker compose -f docker-compose.prod.yaml up -d
+
+x-app: &app
+  build:
+    context: .
+    target: dev
+  env_file:
+    - path: .env
+      required: false
+  environment:
+    QDRANT_HOST: qdrant
+  extra_hosts:
+    - "host.docker.internal:host-gateway"  # reach Ollama on the host
+  volumes:
+    - .:/app
+    - uv-cache:/root/.cache/uv
+  depends_on:
+    qdrant:
+      condition: service_healthy
+
+services:
+  app:
+    <<: *app
+    # uv run re-syncs /venv if pyproject.toml or uv.lock changed.
+    command: uv run --locked wikijs2rag
+
+  # Command-line search; only runs when asked (docker compose run --rm query ...).
+  query:
+    <<: *app
+    profiles: [tools]
+    entrypoint: ["uv", "run", "--locked", "wikijs2rag-query"]
+
+  qdrant:
+    image: qdrant/qdrant:v1.20.0
+    ports:
+      - "${QDRANT_REST_PORT:-6333}:6333"  # REST / dashboard
+      - "${QDRANT_GRPC_PORT:-6334}:6334"  # gRPC
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      # The Qdrant image has no curl or wget; probe /readyz with bash's /dev/tcp.
+      test:
+        - CMD
+        - bash
+        - -c
+        - exec 3<>/dev/tcp/127.0.0.1/6333 && printf 'GET /readyz HTTP/1.0\r\n\r\n' >&3 && grep -q '200 OK' <&3
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+volumes:
+  uv-cache:
+  qdrant_data:
