@@ -7,10 +7,11 @@
 
 Ingests all **public** pages from a [Wiki.js](https://js.wiki/) instance into a
 [Qdrant](https://qdrant.tech/) vector store, ready for any RAG
-(Retrieval-Augmented Generation) pipeline. Embeddings come from the
-[OpenAI embeddings API](https://platform.openai.com/docs/guides/embeddings)
-or any OpenAI-compatible server, such as [Ollama](https://ollama.com/), vLLM
-or LM Studio. It runs
+(Retrieval-Augmented Generation) pipeline. Embeddings come from
+[Hugging Face Text Embeddings Inference](https://github.com/huggingface/text-embeddings-inference)
+running [ModernBERT Embed](https://huggingface.co/nomic-ai/modernbert-embed-base)
+by default, or from any OpenAI-compatible embeddings API, including OpenAI's.
+It runs
 continuously, re-embedding only pages that changed, and stores each chunk with
 enough context (title, section path, neighbours) for a chatbot to ground its
 answers, plus wiki-level statistics such as page counts and contributors.
@@ -95,14 +96,14 @@ from qdrant_client import QdrantClient
 
 client = QdrantClient(host="localhost", port=6333)
 
-# Get the query's embedding from the same OpenAI-compatible API used for
-# ingestion. Omit the Authorization header for local servers without a key.
+# Embed the query with the same model and server used for ingestion (here
+# TEI on its host port) and the model's query prefix: ModernBERT Embed
+# expects "search_query: ". Add an Authorization header if the server needs a key.
 resp = httpx.post(
-    "https://api.openai.com/v1/embeddings",
-    headers={"Authorization": "Bearer <OPENAI_API_KEY>"},
+    "http://localhost:8080/v1/embeddings",
     json={
-        "model": "text-embedding-3-small",
-        "input": ["How do I reset my password?"],
+        "model": "nomic-ai/modernbert-embed-base",
+        "input": ["search_query: How do I reset my password?"],
     },
 )
 query_vector = resp.json()["data"][0]["embedding"]
@@ -172,39 +173,39 @@ for hit in results:
 
 ### Embedding models
 
-OpenAI:
+Hugging Face models, served by TEI (set `EMBEDDING_MODEL` to the model id;
+compose starts TEI with it). Their query and document prefixes are applied
+automatically; see [docs/configuration.md](docs/configuration.md#embedding-prefixes).
 
-| Model | Dimensions | Notes |
-|---|---|---|
-| `text-embedding-3-small` | 1536 | Cheap, good quality (default) |
-| `text-embedding-3-large` | 3072 | Highest quality |
+| Model | Dimensions | Context | Notes |
+|---|---|---|---|
+| `nomic-ai/modernbert-embed-base` | 768 | 8192 | ModernBERT-based, long context (default) |
+| `nomic-ai/nomic-embed-text-v1.5` | 768 | 8192 | Same prefixes as ModernBERT Embed |
+| `intfloat/e5-large-v2` | 1024 | 512 | Set `EMBEDDING_CONTEXT_LENGTH=512` |
+| `mixedbread-ai/mxbai-embed-large-v1` | 1024 | 512 | Query prefix only; set `EMBEDDING_CONTEXT_LENGTH=512` |
+| `Qwen/Qwen3-Embedding-0.6B` | 1024 | 32768 | Instruction-style query prefix |
 
-Ollama, through its OpenAI-compatible endpoint
-(`OPENAI_BASE_URL=http://host.docker.internal:11434/v1`, no API key):
-
-| Model | Dimensions | Notes |
-|---|---|---|
-| `nomic-embed-text` | 768 | Good balance of speed and quality |
-| `all-minilm` | 384 | Fast, small |
-| `mxbai-embed-large` | 1024 | Highest quality |
-| `snowflake-arctic-embed` | 1024 | Strong retrieval performance |
+OpenAI (`OPENAI_BASE_URL=https://api.openai.com/v1`, `OPENAI_API_KEY` set,
+`COMPOSE_PROFILES` without `tei`): `text-embedding-3-small` (1536) or
+`text-embedding-3-large` (3072); no prefixes.
 
 Changing models changes the vector size, which needs a new collection: set a
 new `QDRANT_COLLECTION` and run with `FORCE_REINGEST=true`.
 
 ## Running it
 
-Requires Docker, and either an OpenAI API key or any OpenAI-compatible
-embeddings server. For example, [Ollama](https://ollama.com/) on the same
-machine with an embedding model pulled:
-
-```bash
-ollama pull nomic-embed-text
-```
+Requires Docker. The compose files run
+[Hugging Face Text Embeddings Inference](https://github.com/huggingface/text-embeddings-inference)
+(TEI) serving `EMBEDDING_MODEL` next to the app, when `COMPOSE_PROFILES=tei`
+(as in `.env.example`). The first start downloads the model. TEI needs about
+1.5 GB of memory with the default `TEI_MAX_BATCH_TOKENS=2048`. On ARM machines
+(Apple Silicon, Graviton) set
+`TEI_IMAGE=ghcr.io/huggingface/text-embeddings-inference:cpu-arm64-1.9.4`.
+To use OpenAI or another server instead, remove `COMPOSE_PROFILES` and set
+`OPENAI_BASE_URL` (and `OPENAI_API_KEY` if it needs one).
 
 Configuration comes from environment variables, kept in `.env` (see
-[docs/configuration.md](docs/configuration.md)); set at least `WIKI_URL`, and
-`OPENAI_API_KEY` or `OPENAI_BASE_URL`:
+[docs/configuration.md](docs/configuration.md)); set at least `WIKI_URL`:
 
 ```bash
 cp .env.example .env   # then edit it

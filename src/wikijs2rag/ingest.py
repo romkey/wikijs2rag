@@ -370,7 +370,7 @@ def run(settings: Settings, stop: threading.Event | None = None) -> bool:
                 continue
 
             try:
-                vectors = embedder.encode([c.text for c in chunks], batch_size=settings.batch_size)
+                vectors = embedder.encode_documents([c.text for c in chunks], batch_size=settings.batch_size)
             except Exception as exc:  # httpx or unexpected-response errors; keep going
                 logger.error("  Embedding failed for page %d: %s", page_id, exc)
                 errors += 1
@@ -394,7 +394,7 @@ def run(settings: Settings, stop: threading.Event | None = None) -> bool:
     logger.info("Building wiki metadata chunks…")
     meta_chunks = build_wiki_metadata(pages, wiki_url, all_tags=collected_tags, page_extra=page_extra)
     try:
-        meta_vectors = embedder.encode([mc["text"] for mc in meta_chunks], batch_size=settings.batch_size)
+        meta_vectors = embedder.encode_documents([mc["text"] for mc in meta_chunks], batch_size=settings.batch_size)
         now = datetime.now(UTC).isoformat()
         meta_payloads = [
             {

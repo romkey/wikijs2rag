@@ -74,7 +74,7 @@ class FakeEmbedder:
     def __init__(self, *_a: object, **_k: object) -> None:
         pass
 
-    def encode(self, texts: list[str], batch_size: int = 32) -> list[list[float]]:
+    def encode_documents(self, texts: list[str], batch_size: int = 32) -> list[list[float]]:
         if any("EMBEDFAIL" in t for t in texts):
             raise RuntimeError("embed fail")
         return [[0.1, 0.2, 0.3] for _ in texts]

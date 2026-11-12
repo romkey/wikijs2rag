@@ -60,7 +60,7 @@ class FakeEmbedder:
         if FakeEmbedder.error:
             raise FakeEmbedder.error
 
-    def encode(self, texts: list[str]) -> list[list[float]]:
+    def encode_queries(self, texts: list[str]) -> list[list[float]]:
         return [[0.0, 1.0]]
 
 

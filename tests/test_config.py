@@ -44,7 +44,13 @@ def test_reads_environment() -> None:
         wiki_api_key="dummy-wiki-key",
         qdrant=QdrantSettings(host="db", port=7000, collection="c"),
         embedding=EmbeddingSettings(
-            base_url="http://o:1/v1", model="m", context_length=512, api_key="dummy-openai-key", dimensions=256
+            base_url="http://o:1/v1",
+            model="m",
+            context_length=512,
+            api_key="dummy-openai-key",
+            dimensions=256,
+            query_prefix="",
+            document_prefix="",
         ),
         chunk_size=100,
         chunk_overlap=10,
@@ -55,6 +61,58 @@ def test_reads_environment() -> None:
         poll_interval=0,
         log_level="DEBUG",
     )
+
+
+def test_default_embedding_is_modernbert_with_its_prefixes() -> None:
+    e = Settings.from_env(WIKI).embedding
+    assert e.model == "nomic-ai/modernbert-embed-base"
+    assert e.base_url == "http://localhost:8080/v1"
+    assert e.context_length == 8192
+    assert (e.query_prefix, e.document_prefix) == ("search_query: ", "search_document: ")
+
+
+@pytest.mark.parametrize(
+    ("model", "query", "document"),
+    [
+        ("intfloat/multilingual-e5-large", "query: ", "passage: "),
+        ("mixedbread-ai/mxbai-embed-large-v1", "Represent this sentence for searching relevant passages: ", ""),
+        ("text-embedding-3-small", "", ""),
+    ],
+)
+def test_prefixes_default_to_the_models(model: str, query: str, document: str) -> None:
+    e = EmbeddingSettings.from_env({"EMBEDDING_MODEL": model})
+    assert (e.query_prefix, e.document_prefix) == (query, document)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("", "search_query: "),  # blank: the model's prefix
+        ("   ", "search_query: "),
+        ("none", ""),
+        (" NONE ", ""),
+        ("q: ", "q: "),  # kept as written
+        ("q:", "q: "),  # a space added
+        ("Instruct: find\\nQuery:", "Instruct: find\nQuery: "),  # a literal backslash-n becomes a newline
+    ],
+)
+def test_query_prefix_values(value: str, expected: str) -> None:
+    e = EmbeddingSettings.from_env({"EMBEDDING_QUERY_PREFIX": value})
+    assert e.query_prefix == expected
+    assert e.document_prefix == "search_document: "
+
+
+def test_document_prefix_override_and_none() -> None:
+    assert EmbeddingSettings.from_env({"EMBEDDING_DOCUMENT_PREFIX": "doc: "}).document_prefix == "doc: "
+    assert EmbeddingSettings.from_env({"EMBEDDING_DOCUMENT_PREFIX": "none"}).document_prefix == ""
+
+
+def test_embedder_gets_prefixes(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
+    monkeypatch.setattr("wikijs2rag.config.OpenAIEmbedder", lambda *_a, **k: seen.update(k))
+    EmbeddingSettings(query_prefix="q: ", document_prefix="d: ").embedder()
+    assert seen["query_prefix"] == "q: "
+    assert seen["document_prefix"] == "d: "
 
 
 def test_blank_values_use_defaults() -> None:
