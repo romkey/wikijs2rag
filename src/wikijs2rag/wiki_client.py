@@ -15,12 +15,15 @@ Priority order for page content:
 
 import logging
 import time
-from typing import Optional
+from typing import Any
 
 import httpx
 from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
+
+# Wiki.js GraphQL responses (and the payloads built from them) are untyped JSON.
+type JSON = dict[str, Any]
 
 _LIST_PAGES_QUERY = """
 query {
@@ -77,6 +80,7 @@ class WikiClientError(Exception):
 
 class WikiPageForbiddenError(WikiClientError):
     """Raised when the API returns error 6013 (PageViewForbidden)."""
+
     pass
 
 
@@ -84,11 +88,11 @@ class WikiClient:
     def __init__(
         self,
         base_url: str,
-        api_key: Optional[str] = None,
+        api_key: str | None = None,
         timeout: float = 30.0,
         retry_delay: float = 2.0,
         max_retries: int = 3,
-    ):
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.graphql_url = f"{self.base_url}/graphql"
         self.retry_delay = retry_delay
@@ -104,8 +108,8 @@ class WikiClient:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _query(self, query: str, variables: Optional[dict] = None) -> dict:
-        payload: dict = {"query": query}
+    def _query(self, query: str, variables: JSON | None = None) -> JSON:
+        payload: JSON = {"query": query}
         if variables:
             payload["variables"] = variables
 
@@ -120,40 +124,37 @@ class WikiClient:
                     # so callers can decide whether to try a fallback.
                     for err in errors:
                         code = (err.get("extensions") or {}).get("exception", {}).get("code")
-                        msg  = (err.get("message") or "").lower()
+                        msg = (err.get("message") or "").lower()
                         if code == 6013 or "not authorized" in msg:
-                            raise WikiPageForbiddenError(
-                                f"GraphQL error 6013 (PageViewForbidden): {errors}"
-                            )
+                            raise WikiPageForbiddenError(f"GraphQL error 6013 (PageViewForbidden): {errors}")
                     raise WikiClientError(f"GraphQL errors: {errors}")
-                return data["data"]
+                result: JSON = data["data"]
+                return result
             except httpx.HTTPStatusError as exc:
-                if exc.response.status_code == 429 or exc.response.status_code >= 500:
-                    if attempt < self.max_retries:
-                        logger.warning(
-                            "HTTP %s on attempt %d/%d, retrying in %.1fs…",
-                            exc.response.status_code,
-                            attempt,
-                            self.max_retries,
-                            self.retry_delay,
-                        )
-                        time.sleep(self.retry_delay * attempt)
-                        continue
+                retryable = exc.response.status_code == 429 or exc.response.status_code >= 500
+                if retryable and attempt < self.max_retries:
+                    logger.warning(
+                        "HTTP %s on attempt %d/%d, retrying in %.1fs…",
+                        exc.response.status_code,
+                        attempt,
+                        self.max_retries,
+                        self.retry_delay * attempt,
+                    )
+                    time.sleep(self.retry_delay * attempt)
+                    continue
                 raise WikiClientError(str(exc)) from exc
             except WikiPageForbiddenError:
                 raise  # don't retry auth failures
             except httpx.RequestError as exc:
                 if attempt < self.max_retries:
-                    logger.warning(
-                        "Request error on attempt %d/%d: %s", attempt, self.max_retries, exc
-                    )
+                    logger.warning("Request error on attempt %d/%d: %s", attempt, self.max_retries, exc)
                     time.sleep(self.retry_delay * attempt)
                     continue
                 raise WikiClientError(str(exc)) from exc
 
         raise WikiClientError("Exceeded max retries")
 
-    def _scrape_page(self, path: str, meta: dict) -> Optional[dict]:
+    def _scrape_page(self, path: str, meta: JSON) -> JSON | None:
         """
         Fetch the rendered HTML for *path* and extract text content.
 
@@ -193,30 +194,30 @@ class WikiClient:
         html_content = str(content_el)
 
         return {
-            "id":          meta.get("id"),
-            "path":        path,
-            "title":       meta.get("title") or "",
-            "content":     html_content,
+            "id": meta.get("id"),
+            "path": path,
+            "title": meta.get("title") or "",
+            "content": html_content,
             "description": "",
             "contentType": "html",
-            "tags":        [],
-            "createdAt":   "",
-            "updatedAt":   meta.get("updatedAt") or "",
+            "tags": [],
+            "createdAt": "",
+            "updatedAt": meta.get("updatedAt") or "",
         }
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def list_public_pages(self) -> list[dict]:
+    def list_public_pages(self) -> list[JSON]:
         """Return metadata for all published, non-private pages."""
         data = self._query(_LIST_PAGES_QUERY)
-        pages = data["pages"]["list"]
+        pages: list[JSON] = data["pages"]["list"]
         public = [p for p in pages if p.get("isPublished") and not p.get("isPrivate")]
         logger.info("Found %d public pages out of %d total", len(public), len(pages))
         return public
 
-    def get_page(self, page_id: int, meta: Optional[dict] = None) -> Optional[dict]:
+    def get_page(self, page_id: int, meta: JSON | None = None) -> JSON | None:
         """
         Fetch full content for a single page.
 
@@ -226,20 +227,19 @@ class WikiClient:
         """
         try:
             data = self._query(_GET_PAGE_QUERY, {"id": page_id})
-            return data["pages"]["single"]
+            page: JSON | None = data["pages"]["single"]
+            return page
         except WikiPageForbiddenError:
             if meta and meta.get("path"):
-                logger.debug(
-                    "  GraphQL access denied for page %d, trying HTML scrape.", page_id
-                )
+                logger.debug("  GraphQL access denied for page %d, trying HTML scrape.", page_id)
                 return self._scrape_page(meta["path"], meta)
             raise
 
     def close(self) -> None:
         self._client.close()
 
-    def __enter__(self):
+    def __enter__(self) -> WikiClient:
         return self
 
-    def __exit__(self, *_):
+    def __exit__(self, *_: object) -> None:
         self.close()

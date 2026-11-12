@@ -1,16 +1,15 @@
 """
 Embedding backend — OpenAI-compatible API.
 
-Talks to the OpenAI /v1/embeddings HTTP endpoint using httpx.  Works with
-OpenAI itself and with any OpenAI-compatible server (Ollama's /v1, vLLM,
-LM Studio, LiteLLM, …).
+Talks to the /v1/embeddings HTTP endpoint using httpx:
+https://platform.openai.com/docs/api-reference/embeddings
 
-Set OPENAI_BASE_URL, EMBEDDING_MODEL, and optionally OPENAI_API_KEY in your
-environment.
+Works with OpenAI itself and with any OpenAI-compatible server (Ollama's /v1,
+vLLM, LM Studio, LiteLLM, …).
 """
 
 import logging
-import os
+from typing import Any
 
 import httpx
 
@@ -30,7 +29,7 @@ class OpenAIEmbedder:
         context_length: int = _DEFAULT_CONTEXT_LENGTH,
         api_key: str | None = None,
         dimensions: int | None = None,
-    ):
+    ) -> None:
         self._model_name = model_name
         self._base_url = base_url.rstrip("/")
         self._dimensions = dimensions
@@ -40,7 +39,10 @@ class OpenAIEmbedder:
 
         logger.info(
             "Connecting to embeddings API at %s (model=%s, context_length=%d, auth=%s)…",
-            self._base_url, model_name, context_length, "enabled" if api_key else "disabled",
+            self._base_url,
+            model_name,
+            context_length,
+            "enabled" if api_key else "disabled",
         )
         probe = self._embed_batch(["dimension probe"])
         self._dim = len(probe[0])
@@ -50,7 +52,7 @@ class OpenAIEmbedder:
         """Truncate text to stay within the model's context window.
 
         Uses a conservative 1 token ≈ 0.75 words heuristic; most sub-word
-        tokenisers average 1.2–1.5 tokens per whitespace-delimited word,
+        tokenisers average 1.2-1.5 tokens per whitespace-delimited word,
         so this leaves headroom.
         """
         max_words = int(self._context_length * 0.75)
@@ -59,33 +61,27 @@ class OpenAIEmbedder:
             return text
         logger.warning(
             "Truncating text from %d to %d words (context_length=%d tokens).",
-            len(words), max_words, self._context_length,
+            len(words),
+            max_words,
+            self._context_length,
         )
         return " ".join(words[:max_words])
 
     def _embed_batch(self, texts: list[str]) -> list[list[float]]:
-        payload: dict = {
-            "model": self._model_name,
-            "input": texts,
-            "encoding_format": "float",
-        }
+        url = f"{self._base_url}/embeddings"
+        payload: dict[str, Any] = {"model": self._model_name, "input": texts, "encoding_format": "float"}
         if self._dimensions:
             payload["dimensions"] = self._dimensions
 
-        resp = self._client.post(f"{self._base_url}/embeddings", json=payload)
+        resp = self._client.post(url, json=payload)
         if resp.is_error:
-            raise RuntimeError(
-                f"Embeddings request to {self._base_url}/embeddings failed "
-                f"({resp.status_code}): {resp.text[:500]}"
-            )
+            raise RuntimeError(f"Embeddings request to {url} failed ({resp.status_code}): {resp.text[:500]}")
         data = resp.json()
 
-        items = data.get("data")
+        items = data.get("data") if isinstance(data, dict) else None
         if not isinstance(items, list) or len(items) != len(texts):
-            raise RuntimeError(
-                f"Unexpected response from {self._base_url}/embeddings: "
-                f"{list(data.keys()) if isinstance(data, dict) else type(data).__name__}"
-            )
+            shape = list(data) if isinstance(data, dict) else type(data).__name__
+            raise RuntimeError(f"Unexpected response from {url}: {shape}")
         # The API may return items out of order; sort by their index.
         items = sorted(items, key=lambda d: d.get("index", 0))
         return [d["embedding"] for d in items]
@@ -100,13 +96,3 @@ class OpenAIEmbedder:
             batch = [self._truncate(t) for t in texts[i : i + batch_size]]
             results.extend(self._embed_batch(batch))
         return results
-
-
-def build_embedder() -> OpenAIEmbedder:
-    model = os.environ.get("EMBEDDING_MODEL", OpenAIEmbedder._DEFAULT_MODEL)
-    url = os.environ.get("OPENAI_BASE_URL", "").strip() or OpenAIEmbedder._DEFAULT_BASE_URL
-    api_key = os.environ.get("OPENAI_API_KEY", "").strip() or None
-    ctx = int(os.environ.get("EMBEDDING_CONTEXT_LENGTH", str(OpenAIEmbedder._DEFAULT_CONTEXT_LENGTH)))
-    dims_raw = os.environ.get("EMBEDDING_DIMENSIONS", "").strip()
-    dims = int(dims_raw) if dims_raw else None
-    return OpenAIEmbedder(model, base_url=url, context_length=ctx, api_key=api_key, dimensions=dims)

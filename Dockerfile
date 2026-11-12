@@ -1,42 +1,44 @@
 # syntax=docker/dockerfile:1
+#
+# Stages:
+#   dev         uv and every dependency group. docker-compose.yaml and
+#               docker-compose.test.yaml mount the working tree over /app.
+#   production  the app and its runtime dependencies only, as a non-root
+#               user. Released to ghcr.io by .github/workflows/release.yaml.
+#
+# The python tag matches .python-version and requires-python in
+# pyproject.toml; change all three together.
 
-FROM python:3.12-slim AS deps
-
-WORKDIR /build
-COPY requirements.txt .
-
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install --no-cache-dir -r requirements.txt && \
-    rm -rf /usr/local/lib/python3.12/site-packages/pip \
-           /usr/local/lib/python3.12/site-packages/pip-*.dist-info \
-           /usr/local/lib/python3.12/site-packages/setuptools \
-           /usr/local/lib/python3.12/site-packages/setuptools-*.dist-info \
-           /usr/local/lib/python3.12/site-packages/pkg_resources \
-    && find /usr/local/lib/python3.12/site-packages \
-       -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; true
-
-
-FROM python:3.12-slim
-
-RUN useradd -m -u 1000 appuser && \
-    rm -rf /usr/local/lib/python3.12/site-packages/pip \
-           /usr/local/lib/python3.12/site-packages/setuptools \
-    && find /usr/local/lib/python3.12 -type d -name __pycache__ \
-       -exec rm -rf {} + 2>/dev/null; true
-
-COPY --from=deps /usr/local/lib/python3.12/site-packages \
-                  /usr/local/lib/python3.12/site-packages
-COPY --from=deps /usr/local/bin /usr/local/bin
-
+FROM python:3.15-slim-trixie AS base
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    UV_PROJECT_ENVIRONMENT=/venv \
+    PATH=/venv/bin:$PATH
 WORKDIR /app
-COPY src/ .
-COPY VERSION .
-RUN chown -R appuser:appuser /app
 
-ARG VERSION=unknown
-LABEL org.opencontainers.image.version="${VERSION}"
-LABEL org.opencontainers.image.source="https://github.com/romkey/wikijs2rag"
+FROM base AS build
+COPY --from=ghcr.io/astral-sh/uv:0.13.7 /uv /uvx /bin/
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=0
+# Dependencies first, so a source change doesn't reinstall them.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,source=uv.lock,target=uv.lock \
+    --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
+    uv sync --locked --no-dev --no-install-project
+COPY . .
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked --no-dev --no-editable
 
-USER appuser
+FROM build AS dev
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --locked
+CMD ["python", "-m", "wikijs2rag"]
 
-CMD ["python", "main.py"]
+FROM base AS production
+# Numeric, so orchestrators can verify it isn't root.
+RUN groupadd --system --gid 10001 app \
+ && useradd --system --gid 10001 --uid 10001 --no-log-init --no-create-home app
+COPY --from=build /venv /venv
+USER 10001:10001
+CMD ["wikijs2rag"]

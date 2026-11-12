@@ -1,13 +1,40 @@
-# wiki2rag
+# wikijs2rag
+
+[![CI](https://github.com/romkey/wikijs2rag/actions/workflows/ci.yaml/badge.svg)](https://github.com/romkey/wikijs2rag/actions/workflows/ci.yaml)
+[![Lint](https://github.com/romkey/wikijs2rag/actions/workflows/lint.yaml/badge.svg)](https://github.com/romkey/wikijs2rag/actions/workflows/lint.yaml)
+[![Python 3.15](https://img.shields.io/badge/python-3.15-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Ingests all **public** pages from a [Wiki.js](https://js.wiki/) instance into a
-[Qdrant](https://qdrant.tech/) vector store, ready for use in any RAG
-(Retrieval-Augmented Generation) pipeline.  Uses the
-[OpenAI embeddings API](https://platform.openai.com/docs/guides/embeddings) —
-or any OpenAI-compatible server, such as [Ollama](https://ollama.com/), vLLM or
-LM Studio — for embeddings.
+[Qdrant](https://qdrant.tech/) vector store, ready for any RAG
+(Retrieval-Augmented Generation) pipeline. Embeddings come from the
+[OpenAI embeddings API](https://platform.openai.com/docs/guides/embeddings)
+or any OpenAI-compatible server, such as [Ollama](https://ollama.com/), vLLM
+or LM Studio. It runs
+continuously, re-embedding only pages that changed, and stores each chunk with
+enough context (title, section path, neighbours) for a chatbot to ground its
+answers, plus wiki-level statistics such as page counts and contributors.
 
-## How it works
+> **AI disclosure:** This project was written by AI under human oversight,
+> following [these rules](https://github.com/romkey/python-ai-rules/blob/main/RULES.md).
+
+## What's here
+
+| Path | What it is |
+|------|------------|
+| `src/wikijs2rag/__main__.py` | The `wikijs2rag` command: ingests on start, then every `POLL_INTERVAL_SECONDS`; stops cleanly on SIGTERM |
+| `src/wikijs2rag/ingest.py` | One ingestion run: fetch, chunk, embed, store; builds chunk payloads and wiki metadata chunks |
+| `src/wikijs2rag/wiki_client.py` | Wiki.js GraphQL client: lists published, non-private pages; retries; falls back to scraping HTML |
+| `src/wikijs2rag/chunker.py` | Structure-aware splitting: headers → tables/lists/code kept whole → overlapping word windows |
+| `src/wikijs2rag/embedder.py` | OpenAI-compatible `/v1/embeddings` client with batching and truncation to the model's context |
+| `src/wikijs2rag/store.py` | Qdrant wrapper: collection, payload indexes, replace-per-page upserts |
+| `src/wikijs2rag/query.py` | The `wikijs2rag-query` command-line search tool |
+| `src/wikijs2rag/config.py` | Settings from environment variables, validated at startup |
+| `tests/` | pytest tests; no real Wiki.js, embeddings API or Qdrant needed |
+| `docs/configuration.md` | Every environment variable |
+| `docs/overview.md` | A short map of the project |
+
+## Technical details
 
 ```
 Wiki.js GraphQL API
@@ -25,150 +52,28 @@ Wiki.js GraphQL API
     store.py       ← upserts into Qdrant with payload indexes
 ```
 
-Qdrant persists the vectors in a named Docker volume.  Any application that
-can speak to Qdrant's REST or gRPC API can query the same data – no coupling
-to this ingestion code required.
+- **Incremental:** a page is re-fetched and re-embedded only when its
+  `updatedAt` differs from what's stored. `FORCE_REINGEST=true` redoes all.
+- **Per-page replacement:** a page's old points are deleted before its new
+  ones are written, so edits never leave stale chunks behind.
+- **HTML fallback:** when Wiki.js's GraphQL `pages.single` refuses a page
+  that guests can see in the browser (error 6013), the rendered page is
+  scraped instead.
+- **Wiki metadata:** after the pages, it stores chunks describing the wiki
+  itself (page count, contributors, tags, recently updated, newest pages and a
+  full page listing), so a chatbot can answer "how many pages are there?" or
+  "who are the top contributors?".
 
----
+Qdrant keeps the vectors in a Docker volume. Anything that speaks Qdrant's
+REST or gRPC API can query them; nothing depends on this code.
 
-## Prerequisites
-
-- **Docker** and **Docker Compose**
-- An **OpenAI API key**, *or* any OpenAI-compatible embeddings server.
-  For example, Ollama running locally with an embedding model pulled:
-
-```bash
-ollama pull nomic-embed-text
-```
-
----
-
-## Quick start
-
-### 1 – Copy and edit the config
+### Querying from the command line
 
 ```bash
-cp .env.example .env
-$EDITOR .env          # set WIKI_URL and OPENAI_API_KEY (or OPENAI_BASE_URL) at minimum
+docker compose -f docker-compose.prod.yaml run --rm query "how do I reset my password?"
+docker compose -f docker-compose.prod.yaml run --rm query --limit 10 --show-text "event manager setup"
+docker compose -f docker-compose.prod.yaml run --rm query --min-score 0.6 --collection wiki-internal "door code"
 ```
-
-**Required:**
-
-| Variable          | Default                       | Description                                  |
-|-------------------|-------------------------------|----------------------------------------------|
-| `WIKI_URL`        | —                             | Base URL of your Wiki.js instance            |
-| `OPENAI_BASE_URL` | `https://api.openai.com/v1`   | Base URL of an OpenAI-compatible API         |
-| `EMBEDDING_MODEL` | `text-embedding-3-small`      | Embedding model name                         |
-
-**Optional but common:**
-
-| Variable             | Default              | Description                                |
-|----------------------|----------------------|--------------------------------------------|
-| `WIKI_API_KEY`       | *(empty)*            | API key if the wiki requires auth          |
-| `OPENAI_API_KEY`     | *(empty)*            | API key (Bearer token); required for OpenAI, optional for local servers |
-| `EMBEDDING_DIMENSIONS` | *(model default)*  | Shorter vectors (`text-embedding-3-*` only) |
-| `QDRANT_COLLECTION`  | `wiki`               | Collection name (one per wiki is sensible) |
-| `CHUNK_SIZE`         | `256`                | Max words per chunk                        |
-| `FORCE_REINGEST`     | `false`              | Set `true` to re-ingest unchanged pages    |
-
-See `.env.example` for the full list.
-
-### 2 – Start Qdrant
-
-```bash
-docker compose up -d qdrant
-```
-
-Qdrant's REST API is now available at `http://localhost:6333`.
-Browse the built-in dashboard at `http://localhost:6333/dashboard`.
-
-### 3 – Build and start the ingestion service
-
-```bash
-docker compose build wiki2rag    # only needed once (or after code changes)
-docker compose up -d wiki2rag    # runs continuously, polling every hour
-```
-
-The service ingests all pages on startup, then sleeps and re-checks for
-changes every `POLL_INTERVAL_SECONDS` (default **3600** = 1 hour).  Only
-pages whose `updatedAt` timestamp has changed are re-fetched and
-re-embedded, so repeated runs are fast.
-
-For a **one-shot run** (ingest once and exit):
-
-```bash
-POLL_INTERVAL_SECONDS=0 docker compose run --rm wiki2rag
-```
-
-The image is lightweight (~200 MB) since embeddings are handled by the API —
-no ML frameworks or models baked in.
-
-After page ingestion, wiki-level **metadata chunks** are automatically
-generated and stored — page count, contributors, tags, recently updated
-pages, newest/oldest pages, and a full page listing.  This lets a chatbot
-answer questions like "how many pages does the wiki have?" or "who are the
-top contributors?" without needing a separate data source.
-
-### Embedding models
-
-OpenAI:
-
-| Model | Dimensions | Notes |
-|---|---|---|
-| `text-embedding-3-small` | 1536 | Cheap, good quality (default) |
-| `text-embedding-3-large` | 3072 | Highest quality |
-
-Using Ollama via its OpenAI-compatible endpoint
-(`OPENAI_BASE_URL=http://host.docker.internal:11434/v1`, no API key):
-
-| Model | Dimensions | Notes |
-|---|---|---|
-| `nomic-embed-text` | 768 | Good balance of speed and quality |
-| `all-minilm` | 384 | Fast, small |
-| `mxbai-embed-large` | 1024 | Highest quality |
-| `snowflake-arctic-embed` | 1024 | Strong retrieval performance |
-
-> **Note:** Changing models requires a new Qdrant collection (different
-> dimensions).  Set a new `QDRANT_COLLECTION` name and run with
-> `FORCE_REINGEST=true`.
-
----
-
-## Querying
-
-### Command-line query tool
-
-`query.py` lets you search the collection directly from the terminal.
-
-**Via Docker (recommended):**
-
-```bash
-# Basic search
-docker compose run --rm query "how do I reset my password?"
-
-# More results
-docker compose run --rm query --limit 10 "event manager setup"
-
-# Show matching text under each result
-docker compose run --rm query --show-text "access control"
-
-# Filter out weak matches
-docker compose run --rm query --min-score 0.6 "door code"
-
-# Different collection
-docker compose run --rm query --collection wiki-internal "onboarding"
-
-# All options
-docker compose run --rm query --help
-```
-
-**Locally (outside Docker):**
-
-```bash
-QDRANT_HOST=localhost python src/query.py "how do I reset my password?"
-```
-
-**Options:**
 
 | Flag | Default | Description |
 |---|---|---|
@@ -177,14 +82,12 @@ QDRANT_HOST=localhost python src/query.py "how do I reset my password?"
 | `--min-score F` | `0.0` | Hide results below this similarity (0–1) |
 | `--collection NAME` | `wiki` | Qdrant collection to search |
 | `--width N` | `100` | Terminal width for text wrapping |
+| `--version` | | Print the version |
 
----
+Each flag has an environment variable default; see
+[docs/configuration.md](docs/configuration.md).
 
-## Querying from other applications
-
-Any language/framework with a Qdrant client can query the store directly.
-
-**Python example:**
+### Querying from other applications
 
 ```python
 import httpx
@@ -192,8 +95,8 @@ from qdrant_client import QdrantClient
 
 client = QdrantClient(host="localhost", port=6333)
 
-# Get embedding from the same OpenAI-compatible API used for ingestion.
-# Omit the Authorization header for local servers that don't need a key.
+# Get the query's embedding from the same OpenAI-compatible API used for
+# ingestion. Omit the Authorization header for local servers without a key.
 resp = httpx.post(
     "https://api.openai.com/v1/embeddings",
     headers={"Authorization": "Bearer <OPENAI_API_KEY>"},
@@ -216,14 +119,13 @@ for hit in results:
     print(f"{hit.score:.3f}  {p['page_title']}  {p['page_url']}")
     # Use p["context"] for LLM grounding – includes title, section, description
     print(p["context"][:300])
-    print()
 ```
 
 ### Payload fields on every point
 
 | Field                | Type         | Description                                           |
 |----------------------|--------------|-------------------------------------------------------|
-| `page_id`            | int          | Wiki.js page ID                                       |
+| `page_id`            | int          | Wiki.js page ID (`0` for metadata chunks)             |
 | `page_title`         | str          | Page title                                            |
 | `page_path`          | str          | Wiki-relative path, e.g. `guides/setup`               |
 | `page_url`           | str          | Full URL                                              |
@@ -246,83 +148,145 @@ for hit in results:
 
 ### Chatbot integration tips
 
-- **Use `context` for LLM grounding**, not `text`.  The `context` field includes
-  the page title, description, and section breadcrumb, giving the LLM enough
-  surrounding information to produce accurate answers.
-
+- **Use `context` for LLM grounding**, not `text`. It adds the page title,
+  description and section breadcrumb, so the LLM knows where the chunk came
+  from.
 - **Filter by tags** for scoped search:
   ```python
   from qdrant_client.models import Filter, FieldCondition, MatchValue
+
   results = client.query_points(
       collection_name="wiki",
       query=query_vector,
-      query_filter=Filter(must=[
-          FieldCondition(key="tags", match=MatchValue(value="safety"))
-      ]),
-      ...
+      query_filter=Filter(must=[FieldCondition(key="tags", match=MatchValue(value="safety"))]),
   )
   ```
+- **Small-to-big retrieval**: search returns small, focused chunks. Use
+  `parent_chunk_index` to fetch sibling chunks for broader context, or follow
+  `prev_chunk_id` / `next_chunk_id` to widen the window.
+- **Deduplicate results**: if pages share boilerplate, several top results
+  may be near-identical. Group by `content_hash` and keep the best hit of each.
+- **Wiki metadata questions** ("how many pages?", "what changed recently?")
+  are answered by the metadata chunks (`is_meta` = `"true"`), which are
+  embedded alongside regular content, so no special filter is needed.
 
-- **Small-to-big retrieval**: search returns small, focused chunks.  Use
-  `parent_chunk_index` to fetch all sibling chunks for broader context, or
-  follow `prev_chunk_id` / `next_chunk_id` to expand the window.
+### Embedding models
 
-- **Deduplicate results**: if multiple pages share boilerplate text, several
-  top-k results may be near-identical.  Group results by `content_hash` and
-  keep only the best-scoring hit per hash before sending context to the LLM.
+OpenAI:
 
-- **Wiki metadata questions**: questions like "how many pages?", "who are the
-  contributors?", or "what was recently updated?" are answered by the metadata
-  chunks (where `is_meta` = `"true"`).  These are embedded alongside regular
-  content so semantic search finds them naturally — no special query filter
-  needed.
+| Model | Dimensions | Notes |
+|---|---|---|
+| `text-embedding-3-small` | 1536 | Cheap, good quality (default) |
+| `text-embedding-3-large` | 3072 | Highest quality |
 
----
+Ollama, through its OpenAI-compatible endpoint
+(`OPENAI_BASE_URL=http://host.docker.internal:11434/v1`, no API key):
 
-## Keeping the data fresh
+| Model | Dimensions | Notes |
+|---|---|---|
+| `nomic-embed-text` | 768 | Good balance of speed and quality |
+| `all-minilm` | 384 | Fast, small |
+| `mxbai-embed-large` | 1024 | Highest quality |
+| `snowflake-arctic-embed` | 1024 | Strong retrieval performance |
 
-The service runs **continuously** by default — after each ingestion it
-sleeps for `POLL_INTERVAL_SECONDS` (default 1 hour) then re-checks for
-changes.  Ingestion is incremental, so only pages whose `updatedAt`
-timestamp has changed are re-fetched and re-embedded.
+Changing models changes the vector size, which needs a new collection: set a
+new `QDRANT_COLLECTION` and run with `FORCE_REINGEST=true`.
+
+## Running it
+
+Requires Docker, and either an OpenAI API key or any OpenAI-compatible
+embeddings server. For example, [Ollama](https://ollama.com/) on the same
+machine with an embedding model pulled:
 
 ```bash
-# Change the polling interval (e.g. every 30 minutes)
-POLL_INTERVAL_SECONDS=1800 docker compose up -d wiki2rag
+ollama pull nomic-embed-text
 ```
 
-### Force full re-ingestion
+Configuration comes from environment variables, kept in `.env` (see
+[docs/configuration.md](docs/configuration.md)); set at least `WIKI_URL`, and
+`OPENAI_API_KEY` or `OPENAI_BASE_URL`:
 
 ```bash
-FORCE_REINGEST=true POLL_INTERVAL_SECONDS=0 docker compose run --rm wiki2rag
+cp .env.example .env   # then edit it
+docker compose -f docker-compose.prod.yaml up -d
 ```
 
----
+That runs the latest release from `ghcr.io/romkey/wikijs2rag` next to Qdrant;
+set `APP_VERSION=X.Y.Z` to pin one. It ingests every public page, then checks
+for changes every `POLL_INTERVAL_SECONDS` (default an hour). Qdrant's REST
+API and dashboard are at http://localhost:6333/dashboard.
 
-## File layout
+For a one-shot run (ingest once and exit), or a full re-ingest:
 
-```
-wiki2rag/
-├── src/
-│   ├── main.py          # ingestion entry point / orchestration
-│   ├── query.py         # command-line query tool
-│   ├── wiki_client.py   # Wiki.js GraphQL client (+ HTML scraping fallback)
-│   ├── chunker.py       # structure-aware text chunking
-│   ├── embedder.py      # OpenAI-compatible embedding backend
-│   ├── store.py         # Qdrant wrapper with payload indexes
-│   └── version.py       # version from VERSION file
-├── docker-compose.yml
-├── Dockerfile
-├── requirements.txt
-├── VERSION
-└── .env.example
+```bash
+POLL_INTERVAL_SECONDS=0 docker compose -f docker-compose.prod.yaml run --rm app
+FORCE_REINGEST=true POLL_INTERVAL_SECONDS=0 docker compose -f docker-compose.prod.yaml run --rm app
 ```
 
-## Wiki.js API key
+### Wiki.js API key
+
+An API key is only needed if your wiki restricts guest access to the GraphQL
+endpoint. To make one:
 
 1. Log in as an administrator and go to **Administration → API Access**.
-2. Create a new key with **Read** permission on **Pages**.
-3. Copy the token into `.env` as `WIKI_API_KEY`.
+2. Create a key with **Read** permission on **Pages**.
+3. Put it in `.env` as `WIKI_API_KEY`.
 
-An API key is only required if your wiki restricts guest access to the GraphQL
-endpoint.  Many public wikis work fine without one.
+### With pip
+
+Needs Python 3.15 or newer, plus a Qdrant you can reach. Install into a
+virtual environment from a release's wheel:
+
+```bash
+python3 -m venv ~/.venvs/wikijs2rag
+~/.venvs/wikijs2rag/bin/pip install https://github.com/romkey/wikijs2rag/releases/download/vX.Y.Z/wikijs2rag-X.Y.Z-py3-none-any.whl
+~/.venvs/wikijs2rag/bin/wikijs2rag --version
+```
+
+Set its environment variables yourself (see
+[docs/configuration.md](docs/configuration.md)); it doesn't read `.env`.
+
+## Development
+
+With Docker, nothing else to install:
+
+```bash
+docker compose up --build                                  # ingest from the working tree, with Qdrant
+docker compose run --rm query "some question"              # search it
+docker compose -f docker-compose.test.yaml run --rm test   # tests with coverage
+docker compose -f docker-compose.lint.yaml run --rm lint   # every lint check, as CI runs them
+```
+
+With [uv](https://docs.astral.sh/uv/), which installs the exact versions CI
+tests (`uv.lock`):
+
+```bash
+uv sync
+uv run pytest
+uv run mypy
+uv run wikijs2rag
+```
+
+With pip (25.1 or newer, for `--group`). pip doesn't read `uv.lock`, so it
+may pick newer dependency versions than CI tested:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -e . --group dev
+pytest
+mypy
+wikijs2rag
+```
+
+Either way, `uvx pre-commit install` (or `pip install pre-commit &&
+pre-commit install`) runs the lint checks on every commit. Tests fake Wiki.js
+and the embeddings API over HTTP and use Qdrant's in-memory mode, so no services are
+needed.
+
+Releases: run the **Release** workflow from the Actions tab, then merge the
+PR it opens. See [CHANGELOG.md](CHANGELOG.md).
+
+## License
+
+[MIT](LICENSE)
