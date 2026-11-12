@@ -136,7 +136,7 @@ def main(argv: Sequence[str] | None = None, out: TextIO | None = None) -> int:
     # ── Embed the query ───────────────────────────────────────────────────────
     try:
         embedder = settings.embedding.embedder()
-        query_vector = embedder.encode([query_text])[0]
+        query_vector = embedder.encode_queries([query_text])[0]
     except Exception as exc:  # httpx transport/HTTP errors or a bad embeddings response
         sys.stderr.write(f"Embedding error: {exc}\n")
         return 1

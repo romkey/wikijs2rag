@@ -9,7 +9,7 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from wikijs2rag.embedder import OpenAIEmbedder
+from wikijs2rag.embedder import OpenAIEmbedder, default_prefixes
 
 
 class ConfigError(ValueError):
@@ -71,6 +71,19 @@ def _bool(env: Mapping[str, str], name: str, default: bool) -> bool:
     raise ConfigError(f"{name} must be true or false, not {text!r}")
 
 
+def _prefix(env: Mapping[str, str], name: str, default: str) -> str:
+    """A text prefix: kept as written (not stripped), with a literal \\n read
+    as a newline and a space added if it doesn't end in whitespace. Blank
+    means *default*; ``none`` means no prefix."""
+    raw = env.get(name, "")
+    if not raw.strip():
+        return default
+    if raw.strip().lower() == "none":
+        return ""
+    value = raw.lstrip().replace("\\n", "\n")
+    return value if value[-1].isspace() else value + " "
+
+
 def _log_level(env: Mapping[str, str]) -> str:
     level = _str(env, "LOG_LEVEL", "INFO").upper()
     if level not in logging.getLevelNamesMapping():
@@ -98,21 +111,27 @@ class QdrantSettings:
 
 @dataclass(frozen=True)
 class EmbeddingSettings:
-    base_url: str = "https://api.openai.com/v1"
-    model: str = "text-embedding-3-small"
-    context_length: int = 8191
+    base_url: str = "http://localhost:8080/v1"
+    model: str = "nomic-ai/modernbert-embed-base"
+    context_length: int = 8192
     api_key: str | None = None
     dimensions: int | None = None
+    query_prefix: str = "search_query: "
+    document_prefix: str = "search_document: "
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> EmbeddingSettings:
         dimensions = _int(env, "EMBEDDING_DIMENSIONS", 0, minimum=0) or None
+        model = _str(env, "EMBEDDING_MODEL", cls.model)
+        query_default, document_default = default_prefixes(model)
         return cls(
             base_url=_url(env, "OPENAI_BASE_URL", cls.base_url),
-            model=_str(env, "EMBEDDING_MODEL", cls.model),
+            model=model,
             context_length=_int(env, "EMBEDDING_CONTEXT_LENGTH", cls.context_length, minimum=1),
             api_key=_optional(env, "OPENAI_API_KEY"),
             dimensions=dimensions,
+            query_prefix=_prefix(env, "EMBEDDING_QUERY_PREFIX", query_default),
+            document_prefix=_prefix(env, "EMBEDDING_DOCUMENT_PREFIX", document_default),
         )
 
     def embedder(self) -> OpenAIEmbedder:
@@ -123,6 +142,8 @@ class EmbeddingSettings:
             context_length=self.context_length,
             api_key=self.api_key,
             dimensions=self.dimensions,
+            query_prefix=self.query_prefix,
+            document_prefix=self.document_prefix,
         )
 
 

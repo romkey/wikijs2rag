@@ -6,6 +6,25 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `EMBEDDING_QUERY_PREFIX` and `EMBEDDING_DOCUMENT_PREFIX`: task prefixes put
+  before queries and documents before embedding. Unset, they default to the
+  model's own prefixes for known models (ModernBERT Embed, nomic-embed-text,
+  e5, mxbai-embed-large, Qwen3-Embedding).
+- The compose files run Hugging Face Text Embeddings Inference as the `tei`
+  service (profile `tei`, on in `.env.example`).
+
+### Changed
+
+- **Breaking:** the default embedding model is now
+  `nomic-ai/modernbert-embed-base` served by TEI (`OPENAI_BASE_URL` defaults
+  to `http://tei/v1` under compose, `http://localhost:8080/v1` natively), and
+  `EMBEDDING_CONTEXT_LENGTH` defaults to 8192. To keep using OpenAI, set
+  `OPENAI_BASE_URL=https://api.openai.com/v1` and
+  `EMBEDDING_MODEL=text-embedding-3-small`. A new model needs a new
+  `QDRANT_COLLECTION` and `FORCE_REINGEST=true`.
+
 ## [2.0.2] - 2026-11-12
 
 ### Fixed

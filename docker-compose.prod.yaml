@@ -1,7 +1,7 @@
 # Production: runs the released image from ghcr.io next to Qdrant.
 # Configure it in .env next to this file (see .env.example and
-# docs/configuration.md). Embeddings come from OPENAI_BASE_URL (OpenAI by
-# default, or e.g. Ollama on the host).
+# docs/configuration.md). Embeddings come from the tei service (Hugging Face
+# Text Embeddings Inference) unless OPENAI_BASE_URL points elsewhere.
 #
 #   docker compose -f docker-compose.prod.yaml up -d
 #   APP_VERSION=1.2.3 docker compose -f docker-compose.prod.yaml up -d   # pin a release
@@ -18,11 +18,15 @@ x-app: &app
       required: false
   environment:
     QDRANT_HOST: qdrant
+    OPENAI_BASE_URL: ${OPENAI_BASE_URL:-http://tei/v1}
   extra_hosts:
-    - "host.docker.internal:host-gateway"  # reach a local embeddings server, e.g. Ollama
+    - "host.docker.internal:host-gateway"  # reach an embeddings server on the host
   depends_on:
     qdrant:
       condition: service_healthy
+    tei:
+      condition: service_healthy
+      required: false  # not running when the "tei" profile is off
   # Least privilege: nothing to write but /tmp, no capabilities.
   read_only: true
   tmpfs:
@@ -45,6 +49,36 @@ services:
     <<: *app
     profiles: [tools]
     entrypoint: ["wikijs2rag-query"]
+
+  # Hugging Face Text Embeddings Inference: serves EMBEDDING_MODEL at
+  # http://tei/v1 inside this network and on host port TEI_PORT. Runs when
+  # COMPOSE_PROFILES includes "tei", as .env.example sets it; drop that to use
+  # another embeddings server. The first start downloads the model into tei_data.
+  # On ARM (Apple Silicon, Graviton) set TEI_IMAGE to the cpu-arm64-* image.
+  tei:
+    image: ${TEI_IMAGE:-ghcr.io/huggingface/text-embeddings-inference:cpu-1.9.4}
+    profiles: [tei]
+    # Warm-up memory grows with the square of max-batch-tokens: about 1.5 GB at
+    # 2048, 3 GB at 4096, over 8 GB at 8192. Longer inputs are truncated.
+    command:
+      - --model-id
+      - ${EMBEDDING_MODEL:-nomic-ai/modernbert-embed-base}
+      - --max-batch-tokens
+      - ${TEI_MAX_BATCH_TOKENS:-2048}
+      - --auto-truncate
+    ports:
+      - "${TEI_PORT:-8080}:80"
+    volumes:
+      - tei_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 300s  # model download on first start
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
 
   qdrant:
     image: qdrant/qdrant:v1.20.0
@@ -70,3 +104,4 @@ services:
 
 volumes:
   qdrant_data:
+  tei_data:
