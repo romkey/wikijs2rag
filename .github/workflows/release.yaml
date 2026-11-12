@@ -244,7 +244,9 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Best effort: runs from a merged PR get a read-only cache token, and
+          # a failed cache write must not stop the image push.
+          cache-to: type=gha,mode=max,ignore-error=true
           provenance: mode=max
           sbom: true
 
