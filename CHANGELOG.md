@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [2.0.2] - 2026-11-12
+
 ### Fixed
 
 - The release workflow failed to push the image when it ran for a merged
