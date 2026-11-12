@@ -1,5 +1,6 @@
 # Development: runs the ingester from your working tree, with the dev
-# dependencies installed, against a local Qdrant. Ollama runs on the host.
+# dependencies installed, against a local Qdrant. The embeddings API is OpenAI or
+# another OpenAI-compatible server, such as Ollama on the host.
 #
 #   cp .env.example .env              # then edit it
 #   docker compose up --build         # Qdrant dashboard: http://localhost:6333/dashboard
@@ -23,7 +24,7 @@ x-app: &app
   environment:
     QDRANT_HOST: qdrant
   extra_hosts:
-    - "host.docker.internal:host-gateway"  # reach Ollama on the host
+    - "host.docker.internal:host-gateway"  # reach a local embeddings server, e.g. Ollama
   volumes:
     - .:/app
     - uv-cache:/root/.cache/uv

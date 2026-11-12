@@ -1,6 +1,7 @@
 # Production: runs the released image from ghcr.io next to Qdrant.
 # Configure it in .env next to this file (see .env.example and
-# docs/configuration.md). Ollama runs on the host or elsewhere (OLLAMA_URL).
+# docs/configuration.md). Embeddings come from OPENAI_BASE_URL (OpenAI by
+# default, or e.g. Ollama on the host).
 #
 #   docker compose -f docker-compose.prod.yaml up -d
 #   APP_VERSION=1.2.3 docker compose -f docker-compose.prod.yaml up -d   # pin a release
@@ -18,7 +19,7 @@ x-app: &app
   environment:
     QDRANT_HOST: qdrant
   extra_hosts:
-    - "host.docker.internal:host-gateway"  # reach Ollama on the host
+    - "host.docker.internal:host-gateway"  # reach a local embeddings server, e.g. Ollama
   depends_on:
     qdrant:
       condition: service_healthy

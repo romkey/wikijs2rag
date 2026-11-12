@@ -8,6 +8,15 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **Breaking:** embeddings come from an OpenAI-compatible `/v1/embeddings`
+  API instead of Ollama's `/api/embed`. `OPENAI_BASE_URL` (default OpenAI)
+  and `OPENAI_API_KEY` replace `OLLAMA_URL` and `OLLAMA_API_KEY`; the default
+  model is now `text-embedding-3-small` and the default context length 8191.
+  Ollama still works through its `/v1` endpoint. New optional
+  `EMBEDDING_DIMENSIONS` for `text-embedding-3-*` models. The new default
+  model has a different vector size, so use a new `QDRANT_COLLECTION` (or
+  `FORCE_REINGEST=true` on a new collection) when switching.
+
 - Follows [python-ai-rules](https://github.com/romkey/python-ai-rules): the
   code is now the `wikijs2rag` package, installable with pip or uv, with
   `wikijs2rag` (ingestion) and `wikijs2rag-query` (search) commands. Both
@@ -27,7 +36,7 @@ All notable changes to this project are documented here. The format follows
 - SIGTERM (`docker stop`) finishes the current page and exits cleanly
   instead of being killed.
 - The query tool reads `QDRANT_HOST`, `QUERY_*` and `NO_COLOR` as before;
-  errors from Ollama now exit with code 1 instead of a traceback.
+  errors from the embeddings API now exit with code 1 instead of a traceback.
 
 ### Fixed
 

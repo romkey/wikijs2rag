@@ -22,7 +22,6 @@ from qdrant_client.models import ScoredPoint
 
 from wikijs2rag import __version__
 from wikijs2rag.config import ConfigError, QuerySettings
-from wikijs2rag.embedder import OllamaEmbedder
 
 # ── Styling ───────────────────────────────────────────────────────────────────
 
@@ -135,13 +134,10 @@ def main(argv: Sequence[str] | None = None, out: TextIO | None = None) -> int:
     query_text = " ".join(args.query)
 
     # ── Embed the query ───────────────────────────────────────────────────────
-    emb = settings.embedding
     try:
-        embedder = OllamaEmbedder(
-            emb.model, base_url=emb.ollama_url, context_length=emb.context_length, api_key=emb.api_key
-        )
+        embedder = settings.embedding.embedder()
         query_vector = embedder.encode([query_text])[0]
-    except Exception as exc:  # httpx transport/HTTP errors or a bad Ollama response
+    except Exception as exc:  # httpx transport/HTTP errors or a bad embeddings response
         sys.stderr.write(f"Embedding error: {exc}\n")
         return 1
 
@@ -161,7 +157,7 @@ def main(argv: Sequence[str] | None = None, out: TextIO | None = None) -> int:
         return 1
 
     # ── Print results ─────────────────────────────────────────────────────────
-    header = f"collection={collection}  model={emb.model}  v{__version__}"
+    header = f"collection={collection}  model={settings.embedding.model}  v{__version__}"
     out.write(f"\n  {style.bold('Query:')} {query_text}\n  {style.dim(header)}\n\n")
 
     if not hits:

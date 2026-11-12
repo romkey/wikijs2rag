@@ -1,7 +1,7 @@
 [project]
 name = "wikijs2rag"
 version = "1.2.3"
-description = "Ingest public Wiki.js pages into a Qdrant vector store for RAG, with Ollama embeddings."
+description = "Ingest public Wiki.js pages into a Qdrant vector store for RAG, with OpenAI-compatible embeddings."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -14,7 +14,7 @@ classifiers = [
 ]
 dependencies = [
   "beautifulsoup4>=4.15.0",  # HTML scraping fallback for pages GraphQL won't serve
-  "httpx>=0.28.1",           # Wiki.js GraphQL and Ollama HTTP APIs
+  "httpx>=0.28.1",           # Wiki.js GraphQL and embeddings HTTP APIs
   "qdrant-client>=1.20.0",   # vector store
 ]
 

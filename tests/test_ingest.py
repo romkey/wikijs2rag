@@ -5,7 +5,7 @@ from typing import Any, ClassVar
 
 import pytest
 
-from wikijs2rag import ingest
+from wikijs2rag import config, ingest
 from wikijs2rag.chunker import Chunk
 from wikijs2rag.config import Settings
 from wikijs2rag.wiki_client import JSON, WikiClientError
@@ -64,7 +64,7 @@ def test_build_wiki_metadata_minimal() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Fakes for run(): Ollama, Qdrant and Wiki.js at their client boundary
+# Fakes for run(): the embeddings API, Qdrant and Wiki.js at their client boundary
 # ---------------------------------------------------------------------------
 
 
@@ -134,7 +134,7 @@ class FakeWiki:
 
 @pytest.fixture
 def fakes(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ingest, "OllamaEmbedder", FakeEmbedder)
+    monkeypatch.setattr(config, "OpenAIEmbedder", FakeEmbedder)
     monkeypatch.setattr(ingest, "VectorStore", FakeStore)
     monkeypatch.setattr(ingest, "WikiClient", FakeWiki)
     FakeStore.instances = []

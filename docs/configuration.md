@@ -14,11 +14,12 @@ Blank values count as unset.
 | `QDRANT_HOST` | `qdrant` | Qdrant host (the compose files set `qdrant`) |
 | `QDRANT_PORT` | `6333` | Qdrant REST port, 1-65535 |
 | `QDRANT_COLLECTION` | `wiki` | Collection to write; one per wiki |
-| `OLLAMA_URL` | `http://localhost:11434` | Ollama base URL. In Docker, `http://host.docker.internal:11434` reaches the host |
-| `OLLAMA_API_KEY` | none | Bearer token for hosted or proxied Ollama APIs |
-| `EMBEDDING_MODEL` | `nomic-embed-text` | Ollama embedding model. Changing it changes the vector size: use a new collection and `FORCE_REINGEST=true` |
-| `EMBEDDING_CONTEXT_LENGTH` | `8192` | Model context in tokens, at least 1; texts are cut to about 0.75 words per token |
-| `EMBEDDING_BATCH_SIZE` | `32` | Chunks per Ollama request, at least 1 |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Base URL of an OpenAI-compatible embeddings API (the part before `/embeddings`). For Ollama on the Docker host: `http://host.docker.internal:11434/v1` |
+| `OPENAI_API_KEY` | none | Bearer token. Required for OpenAI; leave unset for local servers without auth |
+| `EMBEDDING_MODEL` | `text-embedding-3-small` | Embedding model. Changing it changes the vector size: use a new collection and `FORCE_REINGEST=true` |
+| `EMBEDDING_DIMENSIONS` | model's size | Shorter vectors, for `text-embedding-3-*` models only; `0` or unset for the full size |
+| `EMBEDDING_CONTEXT_LENGTH` | `8191` | Model context in tokens, at least 1; texts are cut to about 0.75 words per token |
+| `EMBEDDING_BATCH_SIZE` | `32` | Chunks per embeddings request, at least 1 |
 | `CHUNK_SIZE` | `256` | Maximum words per chunk, at least 1 |
 | `CHUNK_OVERLAP` | `50` | Words shared by consecutive chunks; less than `CHUNK_SIZE` |
 | `PARENT_CHUNK_RATIO` | `4` | Chunks per `parent_chunk_index` group, at least 1 |
@@ -33,8 +34,8 @@ failed.
 
 ## Query tool (`wikijs2rag-query`)
 
-Uses `QDRANT_*`, `OLLAMA_URL`, `OLLAMA_API_KEY`, `EMBEDDING_MODEL` and
-`EMBEDDING_CONTEXT_LENGTH` as above, except that `QDRANT_HOST` defaults to
+Uses `QDRANT_*`, `OPENAI_BASE_URL`, `OPENAI_API_KEY` and the `EMBEDDING_*`
+settings as above, except that `QDRANT_HOST` defaults to
 `localhost`. Command-line flags override these:
 
 | Variable | Flag | Default | Meaning |

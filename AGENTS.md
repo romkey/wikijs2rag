@@ -13,5 +13,5 @@ open a pull request; CI and Lint must pass before it can merge.
 
 - The Qdrant payload fields listed in README.md are consumed by other
   applications; renaming or removing one is a breaking change.
-- Tests never touch a real Wiki.js, Ollama or Qdrant: HTTP is faked with
+- Tests never touch a real Wiki.js, embeddings API or Qdrant: HTTP is faked with
   respx and Qdrant runs in-memory (`tests/conftest.py`).

@@ -1,10 +1,10 @@
 # wikijs2rag overview
 
 **What:** ingests every public Wiki.js page into a Qdrant collection, with
-Ollama embeddings, for any RAG application to search.
+embeddings from any OpenAI-compatible API, for any RAG application to search.
 **Runs as:** worker (`wikijs2rag`), polling every `POLL_INTERVAL_SECONDS`;
 plus a CLI search tool (`wikijs2rag-query`).
-**Talks to:** Wiki.js (GraphQL, HTML fallback), Ollama (`/api/embed`),
+**Talks to:** Wiki.js (GraphQL, HTML fallback), an OpenAI-compatible embeddings API (`/v1/embeddings`),
 Qdrant (REST).
 
 ## Files
@@ -14,7 +14,7 @@ Qdrant (REST).
 - `src/wikijs2rag/ingest.py`: one ingestion run; payload and wiki-metadata builders.
 - `src/wikijs2rag/wiki_client.py`: Wiki.js GraphQL client with retries and HTML scraping fallback.
 - `src/wikijs2rag/chunker.py`: header-aware chunking; tables, lists, code kept whole.
-- `src/wikijs2rag/embedder.py`: Ollama embedding client with truncation.
+- `src/wikijs2rag/embedder.py`: OpenAI-compatible embeddings client with truncation.
 - `src/wikijs2rag/store.py`: Qdrant collection, payload indexes, replace-per-page upserts.
 - `src/wikijs2rag/query.py`: `wikijs2rag-query` command.
 - `tests/`: pytest; one file per module. HTTP faked with respx, Qdrant in-memory.

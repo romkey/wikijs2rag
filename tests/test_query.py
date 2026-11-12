@@ -5,7 +5,7 @@ from typing import ClassVar
 import pytest
 from qdrant_client.models import ScoredPoint
 
-from wikijs2rag import __version__, query
+from wikijs2rag import __version__, config, query
 from wikijs2rag.query import Style
 
 PLAIN = Style(color=False)
@@ -82,7 +82,7 @@ class FakeClient:
 
 @pytest.fixture(autouse=True)
 def fakes(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(query, "OllamaEmbedder", FakeEmbedder)
+    monkeypatch.setattr(config, "OpenAIEmbedder", FakeEmbedder)
     monkeypatch.setattr(query, "QdrantClient", FakeClient)
     for var in ("QUERY_LIMIT", "QUERY_MIN_SCORE", "QUERY_SHOW_TEXT", "QUERY_WIDTH", "NO_COLOR", "QDRANT_COLLECTION"):
         monkeypatch.delenv(var, raising=False)
@@ -148,6 +148,6 @@ def test_qdrant_error(capsys: pytest.CaptureFixture[str]) -> None:
 
 
 def test_embedder_error(capsys: pytest.CaptureFixture[str]) -> None:
-    FakeEmbedder.error = RuntimeError("no ollama")
+    FakeEmbedder.error = RuntimeError("no embeddings")
     assert query.main(["q"], io.StringIO()) == 1
-    assert "Embedding error: no ollama" in capsys.readouterr().err
+    assert "Embedding error: no embeddings" in capsys.readouterr().err

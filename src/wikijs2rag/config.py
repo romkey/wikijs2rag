@@ -9,6 +9,8 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from wikijs2rag.embedder import OpenAIEmbedder
+
 
 class ConfigError(ValueError):
     """An environment variable is missing or set to something unusable."""
@@ -96,18 +98,31 @@ class QdrantSettings:
 
 @dataclass(frozen=True)
 class EmbeddingSettings:
-    ollama_url: str = "http://localhost:11434"
-    model: str = "nomic-embed-text"
-    context_length: int = 8192
+    base_url: str = "https://api.openai.com/v1"
+    model: str = "text-embedding-3-small"
+    context_length: int = 8191
     api_key: str | None = None
+    dimensions: int | None = None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str]) -> EmbeddingSettings:
+        dimensions = _int(env, "EMBEDDING_DIMENSIONS", 0, minimum=0) or None
         return cls(
-            ollama_url=_url(env, "OLLAMA_URL", cls.ollama_url),
+            base_url=_url(env, "OPENAI_BASE_URL", cls.base_url),
             model=_str(env, "EMBEDDING_MODEL", cls.model),
             context_length=_int(env, "EMBEDDING_CONTEXT_LENGTH", cls.context_length, minimum=1),
-            api_key=_optional(env, "OLLAMA_API_KEY"),
+            api_key=_optional(env, "OPENAI_API_KEY"),
+            dimensions=dimensions,
+        )
+
+    def embedder(self) -> OpenAIEmbedder:
+        """Connect to the embeddings API; probes it for the vector size."""
+        return OpenAIEmbedder(
+            self.model,
+            base_url=self.base_url,
+            context_length=self.context_length,
+            api_key=self.api_key,
+            dimensions=self.dimensions,
         )
 
 

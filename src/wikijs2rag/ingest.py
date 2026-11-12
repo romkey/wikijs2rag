@@ -17,7 +17,6 @@ from datetime import UTC, datetime
 from wikijs2rag import __version__
 from wikijs2rag.chunker import Chunk, chunk_page
 from wikijs2rag.config import Settings
-from wikijs2rag.embedder import OllamaEmbedder
 from wikijs2rag.store import VectorStore
 from wikijs2rag.wiki_client import JSON, WikiClient, WikiClientError
 
@@ -302,8 +301,7 @@ def run(settings: Settings, stop: threading.Event | None = None) -> bool:
     Stops early, between pages, once *stop* is set.
     """
     stop = stop or threading.Event()
-    e = settings.embedding
-    embedder = OllamaEmbedder(e.model, base_url=e.ollama_url, context_length=e.context_length, api_key=e.api_key)
+    embedder = settings.embedding.embedder()
     store = connect_store(settings, embedder.dimension, stop)
     wiki_url = settings.wiki_url
 

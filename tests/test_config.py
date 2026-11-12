@@ -25,8 +25,9 @@ def test_reads_environment() -> None:
         "QDRANT_HOST": "db",
         "QDRANT_PORT": "7000",
         "QDRANT_COLLECTION": "c",
-        "OLLAMA_URL": "http://o:1",
-        "OLLAMA_API_KEY": "dummy-ollama-key",
+        "OPENAI_BASE_URL": "http://o:1/v1",
+        "OPENAI_API_KEY": "dummy-openai-key",
+        "EMBEDDING_DIMENSIONS": "256",
         "EMBEDDING_MODEL": "m",
         "EMBEDDING_CONTEXT_LENGTH": "512",
         "CHUNK_SIZE": "100",
@@ -42,7 +43,9 @@ def test_reads_environment() -> None:
         wiki_url="https://wiki.example.com",
         wiki_api_key="dummy-wiki-key",
         qdrant=QdrantSettings(host="db", port=7000, collection="c"),
-        embedding=EmbeddingSettings(ollama_url="http://o:1", model="m", context_length=512, api_key="dummy-ollama-key"),
+        embedding=EmbeddingSettings(
+            base_url="http://o:1/v1", model="m", context_length=512, api_key="dummy-openai-key", dimensions=256
+        ),
         chunk_size=100,
         chunk_overlap=10,
         batch_size=8,
@@ -55,9 +58,19 @@ def test_reads_environment() -> None:
 
 
 def test_blank_values_use_defaults() -> None:
-    s = Settings.from_env({**WIKI, "WIKI_API_KEY": "", "OLLAMA_API_KEY": " ", "CHUNK_SIZE": "", "FORCE_REINGEST": ""})
+    s = Settings.from_env(
+        {
+            **WIKI,
+            "WIKI_API_KEY": "",
+            "OPENAI_API_KEY": " ",
+            "EMBEDDING_DIMENSIONS": "",
+            "CHUNK_SIZE": "",
+            "FORCE_REINGEST": "",
+        }
+    )
     assert s.wiki_api_key is None
     assert s.embedding.api_key is None
+    assert s.embedding.dimensions is None
     assert s.chunk_size == 256
     assert s.force_reingest is False
 
@@ -67,7 +80,8 @@ def test_blank_values_use_defaults() -> None:
     [
         ({}, "WIKI_URL is required"),
         ({"WIKI_URL": "wiki.example.com"}, "WIKI_URL must start with http"),
-        ({**WIKI, "OLLAMA_URL": "ollama:11434"}, "OLLAMA_URL"),
+        ({**WIKI, "OPENAI_BASE_URL": "ollama:11434/v1"}, "OPENAI_BASE_URL"),
+        ({**WIKI, "EMBEDDING_DIMENSIONS": "-1"}, "EMBEDDING_DIMENSIONS must be at least 0"),
         ({**WIKI, "QDRANT_PORT": "0"}, "QDRANT_PORT must be at least 1"),
         ({**WIKI, "QDRANT_PORT": "70000"}, "QDRANT_PORT must be 1-65535"),
         ({**WIKI, "CHUNK_SIZE": "big"}, "CHUNK_SIZE must be a whole number"),

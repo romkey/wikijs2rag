@@ -7,8 +7,10 @@
 
 Ingests all **public** pages from a [Wiki.js](https://js.wiki/) instance into a
 [Qdrant](https://qdrant.tech/) vector store, ready for any RAG
-(Retrieval-Augmented Generation) pipeline. Embeddings come from
-[Ollama](https://ollama.com/), so no cloud API keys are needed. It runs
+(Retrieval-Augmented Generation) pipeline. Embeddings come from the
+[OpenAI embeddings API](https://platform.openai.com/docs/guides/embeddings)
+or any OpenAI-compatible server, such as [Ollama](https://ollama.com/), vLLM
+or LM Studio. It runs
 continuously, re-embedding only pages that changed, and stores each chunk with
 enough context (title, section path, neighbours) for a chatbot to ground its
 answers, plus wiki-level statistics such as page counts and contributors.
@@ -24,11 +26,11 @@ answers, plus wiki-level statistics such as page counts and contributors.
 | `src/wikijs2rag/ingest.py` | One ingestion run: fetch, chunk, embed, store; builds chunk payloads and wiki metadata chunks |
 | `src/wikijs2rag/wiki_client.py` | Wiki.js GraphQL client: lists published, non-private pages; retries; falls back to scraping HTML |
 | `src/wikijs2rag/chunker.py` | Structure-aware splitting: headers → tables/lists/code kept whole → overlapping word windows |
-| `src/wikijs2rag/embedder.py` | Ollama `/api/embed` client with batching and truncation to the model's context |
+| `src/wikijs2rag/embedder.py` | OpenAI-compatible `/v1/embeddings` client with batching and truncation to the model's context |
 | `src/wikijs2rag/store.py` | Qdrant wrapper: collection, payload indexes, replace-per-page upserts |
 | `src/wikijs2rag/query.py` | The `wikijs2rag-query` command-line search tool |
 | `src/wikijs2rag/config.py` | Settings from environment variables, validated at startup |
-| `tests/` | pytest tests; no real Wiki.js, Ollama or Qdrant needed |
+| `tests/` | pytest tests; no real Wiki.js, embeddings API or Qdrant needed |
 | `docs/configuration.md` | Every environment variable |
 | `docs/overview.md` | A short map of the project |
 
@@ -44,7 +46,7 @@ Wiki.js GraphQL API
    chunker.py      ← structure-aware splitting: headers → tables/lists → word window
       │
       ▼
-   embedder.py     ← encodes chunks via Ollama's HTTP API
+   embedder.py     ← encodes chunks via an OpenAI-compatible embeddings API
       │
       ▼
     store.py       ← upserts into Qdrant with payload indexes
@@ -93,16 +95,17 @@ from qdrant_client import QdrantClient
 
 client = QdrantClient(host="localhost", port=6333)
 
-# Get the query's embedding from Ollama. If your Ollama endpoint needs auth, add:
-# headers={"Authorization": "Bearer <OLLAMA_API_KEY>"}
+# Get the query's embedding from the same OpenAI-compatible API used for
+# ingestion. Omit the Authorization header for local servers without a key.
 resp = httpx.post(
-    "http://localhost:11434/api/embed",
+    "https://api.openai.com/v1/embeddings",
+    headers={"Authorization": "Bearer <OPENAI_API_KEY>"},
     json={
-        "model": "nomic-embed-text",
+        "model": "text-embedding-3-small",
         "input": ["How do I reset my password?"],
     },
 )
-query_vector = resp.json()["embeddings"][0]
+query_vector = resp.json()["data"][0]["embedding"]
 
 results = client.query_points(
     collection_name="wiki",
@@ -167,11 +170,21 @@ for hit in results:
   are answered by the metadata chunks (`is_meta` = `"true"`), which are
   embedded alongside regular content, so no special filter is needed.
 
-### Ollama embedding models
+### Embedding models
+
+OpenAI:
 
 | Model | Dimensions | Notes |
 |---|---|---|
-| `nomic-embed-text` | 768 | Good balance of speed and quality (default) |
+| `text-embedding-3-small` | 1536 | Cheap, good quality (default) |
+| `text-embedding-3-large` | 3072 | Highest quality |
+
+Ollama, through its OpenAI-compatible endpoint
+(`OPENAI_BASE_URL=http://host.docker.internal:11434/v1`, no API key):
+
+| Model | Dimensions | Notes |
+|---|---|---|
+| `nomic-embed-text` | 768 | Good balance of speed and quality |
 | `all-minilm` | 384 | Fast, small |
 | `mxbai-embed-large` | 1024 | Highest quality |
 | `snowflake-arctic-embed` | 1024 | Strong retrieval performance |
@@ -181,14 +194,17 @@ new `QDRANT_COLLECTION` and run with `FORCE_REINGEST=true`.
 
 ## Running it
 
-Requires Docker, and [Ollama](https://ollama.com/) with an embedding model:
+Requires Docker, and either an OpenAI API key or any OpenAI-compatible
+embeddings server. For example, [Ollama](https://ollama.com/) on the same
+machine with an embedding model pulled:
 
 ```bash
 ollama pull nomic-embed-text
 ```
 
 Configuration comes from environment variables, kept in `.env` (see
-[docs/configuration.md](docs/configuration.md)); set at least `WIKI_URL`:
+[docs/configuration.md](docs/configuration.md)); set at least `WIKI_URL`, and
+`OPENAI_API_KEY` or `OPENAI_BASE_URL`:
 
 ```bash
 cp .env.example .env   # then edit it
@@ -265,7 +281,7 @@ wikijs2rag
 
 Either way, `uvx pre-commit install` (or `pip install pre-commit &&
 pre-commit install`) runs the lint checks on every commit. Tests fake Wiki.js
-and Ollama over HTTP and use Qdrant's in-memory mode, so no services are
+and the embeddings API over HTTP and use Qdrant's in-memory mode, so no services are
 needed.
 
 Releases: run the **Release** workflow from the Actions tab, then merge the
