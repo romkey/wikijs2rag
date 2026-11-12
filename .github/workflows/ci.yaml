@@ -87,7 +87,9 @@ jobs:
           load: true
           tags: ${{ env.IMAGE }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Best effort: runs from a merged PR get a read-only cache token, and
+          # a failed cache write must not fail the build.
+          cache-to: type=gha,mode=max,ignore-error=true
       - name: Smoke test
         run: |
           docker run --rm "$IMAGE" wikijs2rag --version

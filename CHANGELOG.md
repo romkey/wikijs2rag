@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- The release workflow failed to push the image when it ran for a merged
+  release PR, because GitHub gives those runs a read-only build cache.
+  Writing the cache is now best effort.
+
 ## [2.0.1] - 2026-11-12
 
 ### Changed
