@@ -91,8 +91,9 @@ def main() -> None:
               QDRANT_HOST        default: localhost
               QDRANT_PORT        default: 6333
               QDRANT_COLLECTION  default: wiki
-              EMBEDDING_MODEL    default: nomic-embed-text
-              OLLAMA_URL         default: http://localhost:11434
+              EMBEDDING_MODEL    default: text-embedding-3-small
+              OPENAI_BASE_URL    default: https://api.openai.com/v1
+              OPENAI_API_KEY     default: (none)
         """),
     )
     parser.add_argument("query", nargs="+", help="Search query text")
