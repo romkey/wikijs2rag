@@ -4,7 +4,9 @@
     scripts/check-env-example.py [PROJECT_DIR]
 
 Finds the environment variables read in src/ (env.get("X"), env["X"],
-os.environ.get("X"), os.environ["X"], os.getenv("X")) and fails, naming
+os.environ.get("X"), os.environ["X"], os.getenv("X"), and helpers called
+with the environment followed by a name, such as _int(env, "X", 5)) and
+fails, naming
 each one, if .env.example has no line for it. A commented-out line
 ("# X=...") counts, for variables that are optional or set elsewhere.
 
@@ -37,9 +39,18 @@ def variables_read(source: str) -> set[str]:
     names = set()
     for node in ast.walk(ast.parse(source)):
         name = None
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-            if (node.func.attr == "get" and is_env(node.func.value)) or node.func.attr == "getenv":
+        if isinstance(node, ast.Call):
+            func = node.func
+            if isinstance(func, ast.Attribute) and (
+                (func.attr == "get" and is_env(func.value)) or func.attr == "getenv"
+            ):
                 name = first_name(node.args)
+            else:
+                # A helper given the environment and then a name: _int(env, "X", 5).
+                for i, arg in enumerate(node.args[:-1]):
+                    if is_env(arg):
+                        name = first_name(node.args[i + 1 :])
+                        break
         elif isinstance(node, ast.Subscript) and is_env(node.value):
             name = first_name([node.slice])
         if name:

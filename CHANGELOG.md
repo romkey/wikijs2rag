@@ -8,15 +8,6 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
-- **Breaking:** embeddings come from an OpenAI-compatible `/v1/embeddings`
-  API instead of Ollama's `/api/embed`. `OPENAI_BASE_URL` (default OpenAI)
-  and `OPENAI_API_KEY` replace `OLLAMA_URL` and `OLLAMA_API_KEY`; the default
-  model is now `text-embedding-3-small` and the default context length 8191.
-  Ollama still works through its `/v1` endpoint. New optional
-  `EMBEDDING_DIMENSIONS` for `text-embedding-3-*` models. The new default
-  model has a different vector size, so use a new `QDRANT_COLLECTION` (or
-  `FORCE_REINGEST=true` on a new collection) when switching.
-
 - Follows [python-ai-rules](https://github.com/romkey/python-ai-rules): the
   code is now the `wikijs2rag` package, installable with pip or uv, with
   `wikijs2rag` (ingestion) and `wikijs2rag-query` (search) commands. Both
@@ -50,3 +41,18 @@ All notable changes to this project are documented here. The format follows
 
 - Test suite (99% coverage), strict mypy, ruff, pre-commit hooks, secret
   scanning, CI, lint and release workflows, Renovate, MIT license.
+
+## [2.0.0] - 2026-11-11
+
+Published as the `2.0.0` image from `main`; never tagged.
+
+### Changed
+
+- **Breaking:** embeddings come from an OpenAI-compatible `/v1/embeddings`
+  API instead of Ollama's `/api/embed`. `OPENAI_BASE_URL` (default OpenAI)
+  and `OPENAI_API_KEY` replace `OLLAMA_URL` and `OLLAMA_API_KEY`; the default
+  model is now `text-embedding-3-small` and the default context length 8191.
+  Ollama still works through its `/v1` endpoint. New optional
+  `EMBEDDING_DIMENSIONS` for `text-embedding-3-*` models. The new default
+  model has a different vector size, so use a new `QDRANT_COLLECTION` (or
+  `FORCE_REINGEST=true` on a new collection) when switching.

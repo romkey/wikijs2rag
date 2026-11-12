@@ -1,5 +1,6 @@
 #!/bin/sh
-# Prepares a release: works out the next version from the latest vX.Y.Z tag,
+# Prepares a release: works out the next version from the latest vX.Y.Z tag
+# (or pyproject.toml's version, if that is higher),
 # moves CHANGELOG.md's Unreleased entries under it, labels UPGRADING.md's
 # "## Unreleased:" entries with it (if that file exists), and sets the
 # version in pyproject.toml and uv.lock (and SKILL.md's metadata.version and
@@ -19,9 +20,18 @@ here=$(dirname "$0")
 
 latest=$(git tag --list 'v*' --sort=-v:refname \
   | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)
-latest=${latest:-v0.0.0}
+latest=${latest#v}
+latest=${latest:-0.0.0}
+# A version published without a tag (pyproject.toml ahead of the latest tag)
+# must not be reused: count from whichever is higher.
+if [ -f pyproject.toml ]; then
+  current=$(sed -n 's/^version = "\([0-9]*\.[0-9]*\.[0-9]*\)"$/\1/p' pyproject.toml | head -n 1)
+  if [ -n "$current" ]; then
+    latest=$(printf '%s\n%s\n' "$latest" "$current" | sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1)
+  fi
+fi
 IFS=. read -r major minor patch <<EOF
-${latest#v}
+$latest
 EOF
 case "$bump" in
   major) major=$((major + 1)); minor=0; patch=0 ;;
