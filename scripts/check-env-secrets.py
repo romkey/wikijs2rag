@@ -16,8 +16,8 @@ import sys
 from pathlib import Path
 
 ALLOW = "not-a-secret"
-# Real secrets shorter than this are too likely to match ordinary text.
-MIN_SECRET_LENGTH = 8
+# Real values shorter than this are too likely to match ordinary text.
+MIN_VALUE_LENGTH = 8
 SKIP_DIRS = {".git", ".venv", "node_modules", "__pycache__"}
 
 
@@ -40,8 +40,11 @@ def env_files(root: Path) -> list[Path]:
     return [path for path in root.rglob(".env*") if path.is_file() and not SKIP_DIRS.intersection(path.parts)]
 
 
-def local_secrets(root: Path) -> dict[str, str]:
-    """Maps each real value in local .env files to its variable's name."""
+def env_names_by_value(root: Path) -> dict[str, str]:
+    """Maps each real value in local .env files to its variable's name.
+
+    Only the names are ever printed; the values are used just for matching.
+    """
     files = env_files(root)
     dummies = {value for path in files if path.name.endswith(".example") for value in parse_env(path).values()}
     return {
@@ -49,13 +52,13 @@ def local_secrets(root: Path) -> dict[str, str]:
         for path in files
         if not path.name.endswith(".example")
         for key, value in parse_env(path).items()
-        if len(value) >= MIN_SECRET_LENGTH and value not in dummies
+        if len(value) >= MIN_VALUE_LENGTH and value not in dummies
     }
 
 
 def main(argv: list[str]) -> int:
-    secrets = local_secrets(Path.cwd())
-    if not secrets:
+    names_by_value = env_names_by_value(Path.cwd())
+    if not names_by_value:
         return 0
     failed = False
     for name in argv:
@@ -69,10 +72,10 @@ def main(argv: list[str]) -> int:
         for number, line in enumerate(lines, 1):
             if ALLOW in line:
                 continue
-            for value, key in secrets.items():
-                if value in line:
-                    print(f"{name}:{number}: contains the value of {key} from .env")
-                    failed = True
+            matched = sorted({env_name for value, env_name in names_by_value.items() if value in line})
+            for env_name in matched:
+                print(f"{name}:{number}: contains the value of {env_name} from .env")
+                failed = True
     if failed:
         print("Remove it (and rotate it if it was ever pushed).")
     return 1 if failed else 0
