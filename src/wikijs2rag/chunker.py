@@ -21,6 +21,13 @@ _LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
 _TOKEN = re.compile(r"\w+|[^\w\s]")
 
 
+def _closes(line: str, fence: str) -> bool:
+    """Whether *line* closes a block opened by *fence* (CommonMark: the same
+    character, at least as many, and nothing else on the line)."""
+    stripped = line.strip()
+    return len(stripped) >= len(fence) and set(stripped) == {fence[0]}
+
+
 def count_tokens(text: str) -> int:
     """A tokenizer-free estimate: words and punctuation marks."""
     return len(_TOKEN.findall(text))
@@ -65,7 +72,7 @@ def _blocks(lines: list[str]) -> list[_Block]:
         if m := _FENCE.match(line):
             fence = m.group(1)
             end = i + 1
-            while end < len(lines) and not lines[end].strip().startswith(fence):
+            while end < len(lines) and not _closes(lines[end], fence):
                 end += 1
             blocks.append(_Block("code", "\n".join(lines[i : end + 1]).strip()))
             i = end + 1
@@ -119,12 +126,13 @@ def _sections(markdown: str, anchors: list[Anchor]) -> list[_Section]:
     next_anchor = 0
     in_fence: str | None = None
     for line in markdown.splitlines():
-        if m := _FENCE.match(line):
-            fence = m.group(1)
-            if in_fence is None:
-                in_fence = fence[:3]
-            elif line.strip().startswith(in_fence):
+        if in_fence is not None:
+            if _closes(line, in_fence):
                 in_fence = None
+            sections[-1].lines.append(line)
+            continue
+        if m := _FENCE.match(line):
+            in_fence = m.group(1)
         heading = None if in_fence else _HEADING.match(line)
         if not heading:
             sections[-1].lines.append(line)

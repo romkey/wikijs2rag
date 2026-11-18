@@ -60,9 +60,11 @@ class Counts:
     quarantined: int = 0
     skipped: int = 0
     errors: int = 0
+    completed: bool = False  # the run got through every page and the metadata
+    reconciled: bool = False  # stale points were deleted (the safety valve didn't trip)
 
     def as_dict(self) -> dict[str, int]:
-        return dict(self.__dict__)
+        return {k: v for k, v in self.__dict__.items() if not isinstance(v, bool)}
 
 
 @dataclass
@@ -171,9 +173,23 @@ def build_staged(settings: Settings, page: JSON, meta: JSON, tier: str) -> tuple
     return staged, content.extract_links(staged.rendered_html, settings.wiki_url), hits
 
 
-def index_key(page: StagedPage, items: list[StagedAttachment]) -> str:
-    parts = [page.content_hash, page.tier, *sorted(f"{a.url}:{a.tier}:{a.content_hash}" for a in items)]
-    return hashlib.sha256("\0".join(parts).encode()).hexdigest()
+HELD = "held:"  # indexed, but a member file is held for review: recheck every run
+RETRY = "retry:"  # the last attempt failed: retry next run, keep the old points meanwhile
+
+
+def needs_index(key: str) -> bool:
+    """Whether a staged page's indexed_key says to fetch and index it again."""
+    return not key or key.startswith((HELD, RETRY))
+
+
+def has_points(key: str) -> bool:
+    """Whether a staged page's indexed_key says its points are in the collections."""
+    return bool(key) and key != RETRY
+
+
+def attachment_review(page: StagedPage, item: StagedAttachment) -> tuple[str, str]:
+    """(review queue ID, content hash) of a member-tier file."""
+    return f"{page.source_id}:attachment:{item.url}", item.content_hash or text_hash("\n\n".join(item.pages))
 
 
 def _iso(value: str) -> str | None:
@@ -206,6 +222,20 @@ class Pipeline:
         self.titles: dict[tuple[str, str], str] = {}
 
     # -- helpers ----------------------------------------------------------
+
+    def index_key(self, page: StagedPage, items: list[StagedAttachment]) -> str:
+        """What a page was indexed from: its content, tier, and each file with
+        its review status, so approving a held file changes the key."""
+        parts = [page.content_hash, page.tier]
+        held = False
+        for a in items:
+            status = ""
+            if a.tier == "member" and a.pages:
+                status = self.staging.review_status(*attachment_review(page, a)) or ""
+                held = held or status in ("pending", "rejected")
+            parts.append(f"{a.url}:{a.tier}:{a.content_hash}:{status}")
+        digest = hashlib.sha256("\0".join(sorted(parts[2:]) + parts[:2]).encode()).hexdigest()
+        return HELD + digest if held else digest
 
     def collections(self) -> tuple[str, str]:
         q = self.settings.qdrant
@@ -251,11 +281,8 @@ class Pipeline:
             if not item.pages:
                 continue
             if item.tier == "member":
-                review_id = f"{page.source_id}:attachment:{item.url}"
-                text = "\n\n".join(item.pages)
-                reason = self._gate(
-                    review_id, item.content_hash or text_hash(text), page, f"{page.title}: {item.url}", text
-                )
+                review_id, review_hash = attachment_review(page, item)
+                reason = self._gate(review_id, review_hash, page, f"{page.title}: {item.url}", "\n\n".join(item.pages))
                 if reason:
                     logger.warning("  Attachment %s held back: %s", item.url, reason)
                     continue
@@ -380,14 +407,15 @@ class Pipeline:
             self.store.delete_doc(public, SOURCE, page.source_id)
         self.store.replace_doc(member, SOURCE, page.source_id, vectors, payloads)
         self.staging.set_entity_documents(page.source_id, page.url, roles)
-        self.staging.mark_indexed(page.source_id, index_key(page, items))
+        self.staging.mark_indexed(page.source_id, self.index_key(page, items))
         logger.info("  Indexed %d points (%s, %s)", len(payloads), page.tier, kind)
         return "indexed"
 
     # -- wiki-level metadata ------------------------------------------------
 
     def index_metadata(self) -> None:
-        pages = self.staging.live_pages()
+        # Only pages that are in the collections: never ones held for review.
+        pages = [p for p in self.staging.live_pages() if has_points(p.indexed_key)]
         public, member = self.collections()
         for collection, tier_pages, tier in (
             (public, [p for p in pages if p.tier == "public"], "public"),
@@ -560,7 +588,9 @@ def run(
             except Exception as exc:
                 staging.finish_run(run_id, kind, False, counts.as_dict(), str(exc))
                 raise
-            staging.finish_run(run_id, kind, ok, counts.as_dict())
+            staging.finish_run(
+                run_id, kind, ok, counts.as_dict(), full_completed=counts.completed, reconciled=counts.reconciled
+            )
             logger.info("Run %s (%s) done: %s", run_id, kind, " ".join(f"{k}={v}" for k, v in counts.as_dict().items()))
             return ok
     finally:
@@ -586,6 +616,7 @@ def _run(settings: Settings, staging: Staging, run_id: str, kind: str, stop: thr
         pipeline.index_metadata()
         if kind != "incremental":
             _reconcile(pipeline, kind, counts)
+        counts.completed = True
     finally:
         if llm:
             llm.close()
@@ -610,6 +641,8 @@ def _index(pipeline: Pipeline, page: StagedPage, counts: Counts, label: str) -> 
     except Exception as exc:  # LLM, embeddings or Qdrant failure: retried next run
         logger.error("  Could not index page %s: %s", page.source_id, exc)
         counts.errors += 1
+        previous = page.indexed_key.removeprefix(RETRY)
+        pipeline.staging.mark_indexed(page.source_id, RETRY + previous)
         return
     if result == "flagged":
         counts.flagged += 1
@@ -661,7 +694,7 @@ def _crawl(pipeline: Pipeline, full: bool, stop: threading.Event, counts: Counts
                 or state[3]  # deleted
                 or state[0] != (item.meta.get("updatedAt") or "")
                 or state[1] != item.tier
-                or not state[2]  # never indexed, or held back
+                or needs_index(state[2])  # never indexed, held back, or failed
             )
             if not changed:
                 counts.unchanged += 1
@@ -704,7 +737,8 @@ def _crawl(pipeline: Pipeline, full: bool, stop: threading.Event, counts: Counts
             staging.stage_page(staged, pipeline.run_id, links)
             staging.stage_attachments(sid, files)
             staged.indexed_key = previous.indexed_key if previous else ""
-            if previous and previous.indexed_key == index_key(staged, files) and not settings.force_reingest:
+            unchanged = previous and previous.indexed_key == pipeline.index_key(staged, files)
+            if unchanged and not settings.force_reingest:
                 counts.unchanged += 1
                 continue
             _index(pipeline, staged, counts, "added" if state is None else "updated")
@@ -727,9 +761,10 @@ def _reconcile(pipeline: Pipeline, kind: str, counts: Counts) -> None:
         )
         counts.errors += 1
         return
+    counts.reconciled = kind == "full"
     gone = staging.mark_unseen_deleted(pipeline.run_id) if kind == "full" else []
     staging.clear_entity_documents(gone)
-    live = [p for p in staging.live_pages() if p.indexed_key]
+    live = [p for p in staging.live_pages() if has_points(p.indexed_key)]
     public, member = pipeline.collections()
     stamped = 0
     for collection, docs in ((public, [p for p in live if p.tier == "public"]), (member, live)):

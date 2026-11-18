@@ -451,3 +451,51 @@ def test_metadata_is_per_tier_and_names_no_people() -> None:
     assert set(by_type) == {"overview", "recent", "newest", "page_listing"}
     assert "Total public and member-only pages: 2" in by_type["overview"]
     assert re.search(r"contributor", " ".join(by_type.values()), re.I) is None
+
+
+def test_approved_attachment_gets_indexed(wiki: FakeWiki, settings: Settings, memory_qdrant: QdrantClient) -> None:
+    wiki.files["/member-notes.txt"] = ("member", b"The fob log export for March.", "text/plain")
+    ingest.run(settings)
+    assert "fob log export" not in " ".join(p["text"] for p in _points(memory_qdrant, "hs_member", "1"))
+    staging = _staging(settings)
+    review_id = "1:attachment:http://wiki.test/member-notes.txt"
+    assert review_id in [r["source_id"] for r in staging.pending_reviews()]
+    assert ingest.run(settings, full=False) is True  # still held: no change
+    with staging.begin() as conn:
+        conn.execute(review_queue.update().where(review_queue.c.source_id == review_id).values(status="approved"))
+    assert ingest.run(settings, full=False) is True
+    notes = [p for p in _points(memory_qdrant, "hs_member", "1") if "fob log export" in p["text"]]
+    assert [p["tier"] for p in notes] == ["member"]
+
+
+def test_failed_update_is_retried_and_old_points_kept(
+    wiki: FakeWiki, settings: Settings, memory_qdrant: QdrantClient
+) -> None:
+    ingest.run(settings)
+    tier, page = wiki.pages[2]
+    wiki.pages[2] = (tier, {**page, "content": "EMBEDFAIL", "updatedAt": "2025-02-02T00:00:00Z"})
+    assert ingest.run(settings, full=False) is False
+    assert "2" in _docs(memory_qdrant, "hs_public")  # the old points survive the failure...
+    assert ingest.run(settings, full=True) is False
+    assert "2" in _docs(memory_qdrant, "hs_public")  # ...and a full reconcile
+    wiki.pages[2] = (tier, {**page, "content": "Fixed text.", "updatedAt": "2025-02-02T00:00:00Z"})
+    assert ingest.run(settings, full=False) is True  # same updatedAt, still retried
+    assert any("Fixed text." in p["text"] for p in _points(memory_qdrant, "hs_public", "2"))
+
+
+def test_metadata_leaves_out_held_pages(wiki: FakeWiki, settings: Settings, memory_qdrant: QdrantClient) -> None:
+    ingest.run(settings)
+    meta = " ".join(p["text"] for p in _points(memory_qdrant, "hs_member", "_meta"))
+    assert "Door procedure" in meta
+    assert "Fob audit" not in meta  # held for review
+
+
+def test_failed_full_run_still_resets_reconcile_clock(wiki: FakeWiki, settings: Settings) -> None:
+    tier, page = wiki.pages[2]
+    wiki.pages[2] = (tier, {**page, "content": "EMBEDFAIL"})
+    assert ingest.run(settings) is False  # the first run is full
+    assert ingest.run(settings) is False
+    status = _staging(settings).status()
+    assert status is not None
+    assert status["last_kind"] == "incremental"
+    assert status["last_full_docs_seen"] == 4  # reconciled despite the page error

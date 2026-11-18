@@ -65,3 +65,12 @@ def test_empty_and_heading_only() -> None:
     assert chunk_markdown("") == []
     assert chunk_markdown("# Only a heading") == []
     assert chunk_markdown("# T\n\n1. one\n2. two")[0].text == "1. one\n2. two"
+
+
+def test_nested_fences_stay_one_block() -> None:
+    inner = "````markdown\n# Not a heading\n```\ncode\n```\nstill inside\n````"
+    chunks = chunk_markdown(f"# Real\n\n{inner}\n\nAfter.")
+    assert [c.headings for c in chunks] == [["Real"]]
+    assert chunks[0].text == f"{inner}\n\nAfter."
+    [chunk] = chunk_markdown("```\n```python\nnot a close\n```")
+    assert chunk.text == "```\n```python\nnot a close\n```"

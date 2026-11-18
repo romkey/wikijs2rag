@@ -306,12 +306,12 @@ class Staging:
             return
         key = zlib.crc32(f"wikijs2rag:{source}".encode())
         with self.engine.connect() as conn:
-            got = bool(conn.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": key}).scalar())
+            got = bool(conn.execute(text("SELECT pg_try_advisory_lock(CAST(:k AS bigint))"), {"k": key}).scalar())
             try:
                 yield got
             finally:
                 if got:
-                    conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": key})
+                    conn.execute(text("SELECT pg_advisory_unlock(CAST(:k AS bigint))"), {"k": key})
                     conn.commit()
 
     # -- documents ------------------------------------------------------
@@ -619,16 +619,27 @@ class Staging:
             else:
                 conn.execute(insert(sync_status).values(source=SOURCE, counts="{}", **values))
 
-    def finish_run(self, run_id: str, kind: str, ok: bool, counts: dict[str, int], error: str = "") -> None:
+    def finish_run(
+        self,
+        run_id: str,
+        kind: str,
+        ok: bool,
+        counts: dict[str, int],
+        error: str = "",
+        full_completed: bool = False,
+        reconciled: bool = False,
+    ) -> None:
+        """Record the end of a run. A full run that got through every page
+        resets the reconcile clock even if some pages failed, so a persistent
+        failure doesn't make every poll a full run. Only a run that actually
+        deleted stale points sets the baseline for the safety valve."""
         finished = now()
         values: dict[str, Any] = {"finished_at": finished, "ok": ok, "counts": json.dumps(counts), "error": error}
         status_values = dict(values)
-        if kind == "full" and ok:
-            status_values.update(
-                last_full_run_id=run_id,
-                last_full_finished_at=finished,
-                last_full_docs_seen=counts.get("seen", 0),
-            )
+        if kind == "full" and full_completed:
+            status_values["last_full_finished_at"] = finished
+        if kind == "full" and reconciled:
+            status_values.update(last_full_run_id=run_id, last_full_docs_seen=counts.get("seen", 0))
         with self.begin() as conn:
             conn.execute(update(sync_runs).where(sync_runs.c.run_id == run_id).values(**values))
             conn.execute(update(sync_status).where(sync_status.c.source == SOURCE).values(**status_values))

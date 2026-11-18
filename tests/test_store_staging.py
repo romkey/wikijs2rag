@@ -65,7 +65,7 @@ def test_staging_runs_and_status(staging: Staging) -> None:
     assert staging.last_full_finished_at() is None
     assert staging.last_full_docs_seen() == 0
     staging.start_run("r1", "full")
-    staging.finish_run("r1", "full", True, {"seen": 7})
+    staging.finish_run("r1", "full", True, {"seen": 7}, full_completed=True, reconciled=True)
     staging.start_run("r2", "incremental")
     staging.finish_run("r2", "incremental", False, {"seen": 3}, "boom")
     status = staging.status()
@@ -74,6 +74,10 @@ def test_staging_runs_and_status(staging: Staging) -> None:
     assert staging.last_full_docs_seen() == 7
     assert staging.last_full_finished_at() is not None
     assert [r["run_id"] for r in staging.recent_runs()] == ["r2", "r1"]
+    # A full run that tripped the safety valve resets the clock, not the baseline.
+    staging.start_run("r3", "full")
+    staging.finish_run("r3", "full", False, {"seen": 1}, full_completed=True)
+    assert staging.last_full_docs_seen() == 7
 
 
 def test_staging_cache_review_quarantine(staging: Staging) -> None:
