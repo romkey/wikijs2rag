@@ -81,7 +81,7 @@ documents = Table(
     Column("source_updated_at", String(64), nullable=False, default=""),
     Column("fetched_at", DateTime(timezone=True), nullable=False),
     Column("last_seen_run", String(64), nullable=False, default=""),
-    Column("indexed_key", String(64), nullable=False, default=""),  # hash+tier last indexed
+    Column("indexed_key", String(128), nullable=False, default=""),  # [held:|retry:] + SHA-256 of what was indexed
     Column("deleted_at", DateTime(timezone=True), nullable=True),
 )
 
@@ -129,7 +129,7 @@ review_queue = Table(
     metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("source", String(32), nullable=False),
-    Column("source_id", String(255), nullable=False),
+    Column("source_id", Text, nullable=False),  # page ID, or "<page>:attachment:<url>"
     Column("content_hash", String(64), nullable=False),
     Column("title", Text, nullable=False, default=""),
     Column("url", Text, nullable=False, default=""),
