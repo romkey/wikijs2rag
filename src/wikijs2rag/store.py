@@ -1,13 +1,12 @@
-"""
-Qdrant vector store wrapper.
+"""Qdrant collections: one per access tier, shared with the other sources.
 
-Each wiki page's chunks are stored as points in a single collection.
-Re-running the ingestion for a page first deletes its old points so the
-collection stays consistent (no stale chunks after a page is edited or
-deleted).
-
-Payload indexes are created on filterable fields (page_id, tags, page_path,
-content_hash) so that filtered vector search and delete-by-filter are fast.
+Each point has a named dense vector (``dense``) and a named sparse keyword
+vector (``sparse``, with Qdrant's IDF modifier). Point IDs are
+uuid5(source:doc_id:chunk_index), so re-indexing overwrites. A document's
+points are replaced as a unit: its old points are deleted, then the new ones
+written. Collection metadata records the embedding model, its dimensions and
+the sparse scheme; a mismatch stops the run, because mixing models in one
+collection gives meaningless scores.
 """
 
 import logging
@@ -21,163 +20,160 @@ from qdrant_client.models import (
     FieldCondition,
     Filter,
     MatchValue,
+    Modifier,
     PayloadSchemaType,
     PointStruct,
+    SparseVectorParams,
     VectorParams,
 )
 
+from wikijs2rag import sparse
+
 logger = logging.getLogger(__name__)
+
+DENSE = "dense"
+SPARSE = "sparse"
+
+INDEXES = {
+    "source": PayloadSchemaType.KEYWORD,
+    "tier": PayloadSchemaType.KEYWORD,
+    "asset_ids": PayloadSchemaType.KEYWORD,
+    "location_ids": PayloadSchemaType.KEYWORD,
+    "topics": PayloadSchemaType.KEYWORD,
+    "updated_at": PayloadSchemaType.DATETIME,
+    "section": PayloadSchemaType.KEYWORD,
+    "doc_id": PayloadSchemaType.KEYWORD,
+    "sync_run_id": PayloadSchemaType.KEYWORD,
+    "page_kind": PayloadSchemaType.KEYWORD,
+    "chunk_kind": PayloadSchemaType.KEYWORD,
+}
+
+
+class StoreError(RuntimeError):
+    pass
+
+
+def point_id(source: str, doc_id: str, chunk_index: int) -> str:
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"{source}:{doc_id}:{chunk_index}"))
 
 
 class VectorStore:
-    def __init__(
-        self,
-        host: str,
-        port: int,
-        collection: str,
-        vector_size: int,
-    ) -> None:
-        self._client = QdrantClient(
-            host=host,
-            port=port,
-            prefer_grpc=False,
-        )
-        self._collection = collection
-        self._vector_size = vector_size
-        self._ensure_collection()
-        self._ensure_indexes()
+    def __init__(self, host: str, port: int, embedding_model: str, dimension: int) -> None:
+        self.client = QdrantClient(host=host, port=port, prefer_grpc=False)
+        self.embedding_model = embedding_model
+        self.dimension = dimension
 
-    # ------------------------------------------------------------------
-    # Internals
-    # ------------------------------------------------------------------
-
-    def _ensure_collection(self) -> None:
-        existing = {c.name for c in self._client.get_collections().collections}
-        if self._collection not in existing:
-            self._client.create_collection(
-                collection_name=self._collection,
-                vectors_config=VectorParams(
-                    size=self._vector_size,
-                    distance=Distance.COSINE,
-                ),
-            )
-            logger.info("Created Qdrant collection '%s' (dim=%d)", self._collection, self._vector_size)
-        else:
-            logger.debug("Using existing Qdrant collection '%s'", self._collection)
-
-    def _ensure_indexes(self) -> None:
-        """Create payload field indexes for efficient filtering."""
-        index_fields = {
-            "page_id": PayloadSchemaType.INTEGER,
-            "tags": PayloadSchemaType.KEYWORD,
-            "page_path": PayloadSchemaType.KEYWORD,
-            "content_hash": PayloadSchemaType.KEYWORD,
-            "is_meta": PayloadSchemaType.KEYWORD,
+    def ensure_collection(self, name: str, tier: str) -> None:
+        """Create *name* if missing; check its embedding model if not."""
+        expected = {
+            "embedding_model": self.embedding_model,
+            "embedding_dimensions": self.dimension,
+            "sparse_scheme": sparse.SCHEME,
+            "tier": tier,
         }
-        for field_name, schema_type in index_fields.items():
+        if not self.client.collection_exists(name):
+            self.client.create_collection(
+                collection_name=name,
+                vectors_config={DENSE: VectorParams(size=self.dimension, distance=Distance.COSINE)},
+                sparse_vectors_config={SPARSE: SparseVectorParams(modifier=Modifier.IDF)},
+                metadata=expected,
+            )
+            logger.info("Created Qdrant collection '%s' (dim=%d, tier=%s)", name, self.dimension, tier)
+        else:
+            info = self.client.get_collection(name)
+            found = getattr(info.config, "metadata", None) or {}
+            for key, value in expected.items():
+                if key in found and found[key] != value:
+                    raise StoreError(
+                        f"Collection '{name}' has {key}={found[key]!r}, but this run uses {value!r}. "
+                        "Every source in a collection must use the same embedding model; re-embed all of "
+                        "them into new collections to change it."
+                    )
+            vectors = info.config.params.vectors
+            if not isinstance(vectors, dict) or DENSE not in vectors:
+                raise StoreError(f"Collection '{name}' has no '{DENSE}' vector; it predates wikijs2rag 3")
+        for field_name, schema in INDEXES.items():
             try:
-                self._client.create_payload_index(
-                    collection_name=self._collection,
-                    field_name=field_name,
-                    field_schema=schema_type,
-                )
+                self.client.create_payload_index(collection_name=name, field_name=field_name, field_schema=schema)
             except UnexpectedResponse as exc:
                 logger.debug("Payload index %s not created (probably exists): %s", field_name, exc)
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    @staticmethod
+    def _doc_filter(source: str, doc_id: str) -> Filter:
+        return Filter(
+            must=[
+                FieldCondition(key="source", match=MatchValue(value=source)),
+                FieldCondition(key="doc_id", match=MatchValue(value=doc_id)),
+            ]
+        )
 
-    def delete_page(self, page_id: int) -> None:
-        """Remove all chunks that belong to *page_id*."""
-        try:
-            self._client.delete(
-                collection_name=self._collection,
-                points_selector=Filter(must=[FieldCondition(key="page_id", match=MatchValue(value=page_id))]),
+    def delete_doc(self, collection: str, source: str, doc_id: str) -> None:
+        self.client.delete(collection_name=collection, points_selector=self._doc_filter(source, doc_id))
+
+    def replace_doc(
+        self,
+        collection: str,
+        source: str,
+        doc_id: str,
+        dense: list[list[float]],
+        payloads: list[dict[str, Any]],  # JSON payloads stored as-is
+    ) -> None:
+        if len(dense) != len(payloads):
+            raise ValueError(f"{len(dense)} vectors but {len(payloads)} payloads")
+        self.delete_doc(collection, source, doc_id)
+        if not payloads:
+            return
+        points = [
+            PointStruct(
+                id=payload["id"],
+                vector={DENSE: vec, SPARSE: sparse.document_vector(f"{payload['context']}\n{payload['text']}")},
+                payload=payload,
             )
-        except UnexpectedResponse as exc:
-            logger.warning("Could not delete page %d chunks: %s", page_id, exc)
+            for vec, payload in zip(dense, payloads, strict=True)
+        ]
+        self.client.upsert(collection_name=collection, points=points)
 
-    def get_page_updated_at(self, page_id: int) -> str | None:
-        """Return the updated_at value for the first stored chunk of *page_id*, or None."""
-        try:
-            points, _next = self._client.scroll(
-                collection_name=self._collection,
-                scroll_filter=Filter(must=[FieldCondition(key="page_id", match=MatchValue(value=page_id))]),
-                limit=1,
-                with_payload=["updated_at"],
+    def stamp_doc(self, collection: str, source: str, doc_id: str, run_id: str) -> None:
+        self.client.set_payload(
+            collection_name=collection, payload={"sync_run_id": run_id}, points=self._doc_filter(source, doc_id)
+        )
+
+    def delete_stale(self, collection: str, source: str, run_id: str) -> int:
+        """Delete *source*'s points not stamped with *run_id*; return how many."""
+        stale = Filter(
+            must=[FieldCondition(key="source", match=MatchValue(value=source))],
+            must_not=[FieldCondition(key="sync_run_id", match=MatchValue(value=run_id))],
+        )
+        count = self.client.count(collection_name=collection, count_filter=stale, exact=True).count
+        if count:
+            self.client.delete(collection_name=collection, points_selector=stale)
+        return count
+
+    def delete_source(self, collection: str, source: str) -> None:
+        self.client.delete(
+            collection_name=collection,
+            points_selector=Filter(must=[FieldCondition(key="source", match=MatchValue(value=source))]),
+        )
+
+    def count(self, collection: str, source: str | None = None) -> int:
+        flt = Filter(must=[FieldCondition(key="source", match=MatchValue(value=source))]) if source else None
+        return self.client.count(collection_name=collection, count_filter=flt, exact=True).count
+
+    def scroll_texts(self, collection: str) -> list[tuple[str, str]]:
+        """(doc_id, text + context) of every point, for canary checks."""
+        out: list[tuple[str, str]] = []
+        offset: Any = None
+        while True:
+            points, offset = self.client.scroll(
+                collection_name=collection,
+                limit=256,
+                offset=offset,
+                with_payload=["doc_id", "text", "context", "title"],
                 with_vectors=False,
             )
-            if points and points[0].payload:
-                value = points[0].payload.get("updated_at")
-                return str(value) if value else None
-        except Exception:  # treat an unreachable or missing index as "not stored"
-            logger.debug("Could not read updated_at for page %d", page_id, exc_info=True)
-        return None
-
-    def upsert_page_chunks(
-        self,
-        page_id: int,
-        vectors: list[list[float]],
-        payloads: list[dict[str, Any]],  # JSON-like payloads stored as-is
-    ) -> None:
-        """
-        Replace all stored chunks for *page_id* with the new vectors.
-        """
-        if len(vectors) != len(payloads):
-            raise ValueError(f"{len(vectors)} vectors but {len(payloads)} payloads")
-
-        self.delete_page(page_id)
-
-        points = [
-            PointStruct(
-                id=str(uuid.uuid4()),
-                vector=vec,
-                payload={**payload, "page_id": page_id},
-            )
-            for vec, payload in zip(vectors, payloads, strict=True)
-        ]
-
-        self._client.upsert(collection_name=self._collection, points=points)
-        logger.info("Stored %d chunks for page %d", len(points), page_id)
-
-    def upsert_meta_chunks(
-        self,
-        vectors: list[list[float]],
-        payloads: list[dict[str, Any]],  # JSON-like payloads stored as-is
-    ) -> None:
-        """
-        Replace all wiki metadata chunks (is_meta=true) with new ones.
-
-        Metadata chunks have page_id=0 so they don't collide with real pages.
-        """
-        # Delete old meta chunks
-        try:
-            self._client.delete(
-                collection_name=self._collection,
-                points_selector=Filter(must=[FieldCondition(key="is_meta", match=MatchValue(value="true"))]),
-            )
-        except UnexpectedResponse as exc:
-            logger.warning("Could not delete old metadata chunks: %s", exc)
-
-        points = [
-            PointStruct(
-                id=str(uuid.uuid4()),
-                vector=vec,
-                payload={**payload, "page_id": 0, "is_meta": "true"},
-            )
-            for vec, payload in zip(vectors, payloads, strict=True)
-        ]
-
-        self._client.upsert(collection_name=self._collection, points=points)
-        logger.info("Stored %d wiki metadata chunks", len(points))
-
-    def collection_info(self) -> dict[str, Any]:  # mixed str/int/None values
-        info = self._client.get_collection(self._collection)
-        vectors_count = getattr(info, "vectors_count", None) or getattr(info, "points_count", None)
-        return {
-            "name": self._collection,
-            "vectors_count": vectors_count,
-            "points_count": getattr(info, "points_count", None),
-            "status": str(info.status),
-        }
+            for p in points:
+                payload = p.payload or {}
+                joined = f"{payload.get('title', '')}\n{payload.get('context', '')}\n{payload.get('text', '')}"
+                out.append((str(payload.get("doc_id", "")), joined))
+            if offset is None:
+                return out

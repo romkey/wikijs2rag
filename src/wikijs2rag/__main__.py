@@ -1,7 +1,10 @@
 """Ingestion service: `wikijs2rag` or `python -m wikijs2rag`.
 
-Ingests every public Wiki.js page into Qdrant, then (unless
-POLL_INTERVAL_SECONDS is 0) sleeps and repeats until stopped.
+Syncs the wiki into the staging database and the tiered Qdrant collections,
+then (unless POLL_INTERVAL_SECONDS is 0) sleeps and repeats until stopped.
+Each run is incremental unless a full reconcile is due
+(RECONCILE_INTERVAL_SECONDS) or --full is given. --reindex rebuilds the
+collections from staging without fetching anything, then exits.
 """
 
 import argparse
@@ -27,7 +30,9 @@ PAGE_ERRORS = 2  # one-shot run finished, but some pages failed
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="wikijs2rag", description=__doc__)
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    parser.parse_args(argv)
+    parser.add_argument("--full", action="store_true", help="Make the first run a full reconcile")
+    parser.add_argument("--reindex", action="store_true", help="Rebuild the collections from staging, then exit")
+    args = parser.parse_args(argv)
 
     try:
         settings = Settings.from_env()
@@ -52,18 +57,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     signal.signal(signal.SIGINT, on_signal)
 
     interval = settings.poll_interval
-    if interval <= 0:
+    if interval <= 0 or args.reindex:
         # One-shot mode (e.g. `docker compose run --rm app`)
         try:
-            return OK if run(settings, stop) else PAGE_ERRORS
+            ok = run(settings, stop, full=True if args.full else None, reindex=args.reindex)
         except IngestError as exc:
             logger.error("%s", exc)
             return FATAL
+        return OK if ok else PAGE_ERRORS
 
     logger.info("wikijs2rag %s running in continuous mode (poll every %d s).", __version__, interval)
+    full: bool | None = True if args.full else None
     while not stop.is_set():
         try:
-            run(settings, stop)
+            run(settings, stop, full=full)
+            full = None
         except IngestError as exc:
             logger.error("%s", exc)
             return FATAL

@@ -26,14 +26,14 @@ def client() -> Iterator[WikiClient]:
 
 
 @respx.mock
-def test_list_public_pages_filters_and_sends_auth(client: WikiClient) -> None:
+def test_list_pages_filters_and_sends_auth(client: WikiClient) -> None:
     pages = [
         {"id": 1, "isPublished": True, "isPrivate": False},
         {"id": 2, "isPublished": False, "isPrivate": False},
         {"id": 3, "isPublished": True, "isPrivate": True},
     ]
     route = respx.post(GQL).mock(return_value=httpx.Response(200, json={"data": {"pages": {"list": pages}}}))
-    assert [p["id"] for p in client.list_public_pages()] == [1]
+    assert [p["id"] for p in client.list_pages()] == [1]
     assert route.calls.last.request.headers["Authorization"] == "Bearer dummy-key"
 
 
@@ -54,7 +54,7 @@ def test_get_page_returns_single(client: WikiClient) -> None:
 def test_graphql_error_raises(client: WikiClient) -> None:
     respx.post(GQL).mock(return_value=httpx.Response(200, json={"errors": [{"message": "boom"}]}))
     with pytest.raises(WikiClientError, match="boom"):
-        client.list_public_pages()
+        client.list_pages()
 
 
 @respx.mock
@@ -123,7 +123,7 @@ def test_retries_on_5xx_then_succeeds(client: WikiClient) -> None:
             httpx.Response(200, json={"data": {"pages": {"list": []}}}),
         ]
     )
-    assert client.list_public_pages() == []
+    assert client.list_pages() == []
     assert route.call_count == 3
 
 
@@ -131,7 +131,7 @@ def test_retries_on_5xx_then_succeeds(client: WikiClient) -> None:
 def test_gives_up_after_max_retries_on_5xx(client: WikiClient) -> None:
     route = respx.post(GQL).mock(return_value=httpx.Response(500))
     with pytest.raises(WikiClientError):
-        client.list_public_pages()
+        client.list_pages()
     assert route.call_count == 3
 
 
@@ -139,7 +139,7 @@ def test_gives_up_after_max_retries_on_5xx(client: WikiClient) -> None:
 def test_4xx_not_retried(client: WikiClient) -> None:
     route = respx.post(GQL).mock(return_value=httpx.Response(400))
     with pytest.raises(WikiClientError):
-        client.list_public_pages()
+        client.list_pages()
     assert route.call_count == 1
 
 
@@ -147,10 +147,49 @@ def test_4xx_not_retried(client: WikiClient) -> None:
 def test_request_error_retried_then_raises(client: WikiClient) -> None:
     route = respx.post(GQL).mock(side_effect=httpx.ConnectError("down"))
     with pytest.raises(WikiClientError, match="down"):
-        client.list_public_pages()
+        client.list_pages()
     assert route.call_count == 3
 
 
 def test_zero_retries_raises_exceeded() -> None:
     with WikiClient(BASE, max_retries=0) as c, pytest.raises(WikiClientError, match="Exceeded max retries"):
-        c.list_public_pages()
+        c.list_pages()
+
+
+@respx.mock
+def test_admin_probe(client: WikiClient) -> None:
+    route = respx.post(GQL).mock(return_value=httpx.Response(200, json={"errors": [{"message": "Forbidden"}]}))
+    assert client.has_admin_rights() is False
+    route.mock(return_value=httpx.Response(200, json={"data": {"authentication": {"apiKeys": []}}}))
+    assert client.has_admin_rights() is True
+
+
+@respx.mock
+def test_guest_can_view_sends_no_credentials(client: WikiClient) -> None:
+    route = respx.get(f"{BASE}/p").mock(return_value=httpx.Response(200, text="ok"))
+    assert client.guest_can_view(f"{BASE}/p") is True
+    assert "Authorization" not in route.calls.last.request.headers
+    respx.get(f"{BASE}/q").mock(return_value=httpx.Response(302, headers={"location": f"{BASE}/login"}))
+    respx.get(f"{BASE}/login").mock(return_value=httpx.Response(200, text="login"))
+    assert client.guest_can_view(f"{BASE}/q") is False
+    respx.get(f"{BASE}/r").mock(side_effect=httpx.ConnectError("no"))
+    with pytest.raises(WikiClientError):
+        client.guest_can_view(f"{BASE}/r")
+
+
+@respx.mock
+def test_fetch_file(client: WikiClient) -> None:
+    route = respx.get(f"{BASE}/f.pdf").mock(
+        return_value=httpx.Response(200, content=b"%PDF", headers={"content-type": "application/pdf"})
+    )
+    assert client.fetch_file(f"{BASE}/f.pdf", 100) == (b"%PDF", "application/pdf")
+    assert route.calls.last.request.headers["Authorization"] == "Bearer dummy-key"
+    assert client.fetch_file(f"{BASE}/f.pdf", 2) is None  # too big
+    respx.get(f"{BASE}/h.pdf").mock(
+        return_value=httpx.Response(200, text="<html>", headers={"content-type": "text/html"})
+    )
+    assert client.fetch_file(f"{BASE}/h.pdf", 100) is None
+    respx.get(f"{BASE}/x.pdf").mock(return_value=httpx.Response(403))
+    assert client.fetch_file(f"{BASE}/x.pdf", 100) is None
+    respx.get(f"{BASE}/e.pdf").mock(side_effect=httpx.ConnectError("no"))
+    assert client.fetch_file(f"{BASE}/e.pdf", 100) is None

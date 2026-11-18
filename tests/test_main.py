@@ -11,6 +11,8 @@ from wikijs2rag.ingest import IngestError
 
 type Handler = Callable[[int, object], None]
 
+calls: list[tuple[bool | None, bool]] = []
+
 
 def test_version(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exit_info:
@@ -42,9 +44,11 @@ def _fake_run(
     """Replace ingest.run with one returning/raising *results* in turn."""
     seen: list[threading.Event] = []
     it = iter(results)
+    calls.clear()
 
-    def fake(settings: Settings, stop: threading.Event) -> bool:
+    def fake(settings: Settings, stop: threading.Event, full: bool | None = None, reindex: bool = False) -> bool:
         seen.append(stop)
+        calls.append((full, reindex))
         if on_call:
             on_call()
         r = next(it)
@@ -95,3 +99,19 @@ def test_continuous_fatal_error_exits(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("POLL_INTERVAL_SECONDS", "5")
     _fake_run(monkeypatch, [IngestError("qdrant down")])
     assert cli.main([]) == cli.FATAL
+
+
+@pytest.mark.usefixtures("handlers")
+def test_reindex_runs_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("POLL_INTERVAL_SECONDS", "5")
+    _fake_run(monkeypatch, [True])
+    assert cli.main(["--reindex"]) == cli.OK
+    assert calls == [(None, True)]
+
+
+@pytest.mark.usefixtures("handlers")
+def test_full_flag_applies_to_first_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("POLL_INTERVAL_SECONDS", "0")
+    _fake_run(monkeypatch, [True])
+    assert cli.main(["--full"]) == cli.OK
+    assert calls == [(True, False)]
