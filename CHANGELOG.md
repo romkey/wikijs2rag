@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-11-18
+
 The wiki ingester becomes the wiki source of the shared, tiered RAG
 pipeline. Existing indexed data is not migrated: the new collections are
 built from scratch.
