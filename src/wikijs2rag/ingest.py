@@ -1,285 +1,512 @@
-"""Ingestion: fetch public Wiki.js pages, chunk, embed and store them in Qdrant.
+"""One sync run: two crawls, staging, sanitization, enrichment, indexing, reconcile.
 
-Features:
-  - Incremental ingestion: skips pages whose updatedAt hasn't changed
-  - Enriched context per chunk for LLM grounding
-  - Parent/prev/next chunk references for small-to-big retrieval
-  - Content hash per chunk for deduplication
-  - Wiki-level metadata chunks (page count, contributors, tags, ...)
+    anonymous crawl ─┐                                   ┌─> hs_public (public tier only)
+                     ├─> stage ─> sanitize ─> classify ──┤
+    member crawl ────┘    (Postgres)   chunk, link, embed └─> hs_member (both tiers)
+
+- Tier comes from which crawl can see a page: anything the anonymous crawl
+  lists is ``public``; anything only the member crawl lists is ``member``.
+  It is recomputed every run.
+- Incremental runs refetch pages whose ``updatedAt`` or tier changed, or that
+  were never indexed. Full runs (every RECONCILE_INTERVAL_SECONDS) refetch
+  everything, stamp every document seen with the run ID, and delete this
+  source's points with an older run ID, unless the run saw fewer than half
+  the documents the previous full run saw.
+- ``reindex`` rebuilds both collections from staging without touching the wiki.
 """
 
+import hashlib
 import logging
 import threading
 import uuid
 from collections import Counter
+from contextlib import nullcontext
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
-from wikijs2rag import __version__
-from wikijs2rag.chunker import Chunk, chunk_page
+from wikijs2rag import __version__, attachments, content, sanitize
+from wikijs2rag.chunker import chunk_markdown
+from wikijs2rag.chunker import content_hash as text_hash
 from wikijs2rag.config import Settings
-from wikijs2rag.store import VectorStore
+from wikijs2rag.embedder import OpenAIEmbedder
+from wikijs2rag.enrich import Enricher, authority, load_topics
+from wikijs2rag.linker import Linker
+from wikijs2rag.llm import LLM
+from wikijs2rag.staging import SOURCE, Link, StagedAttachment, StagedPage, Staging
+from wikijs2rag.store import StoreError, VectorStore, point_id
 from wikijs2rag.wiki_client import JSON, WikiClient, WikiClientError
 
 logger = logging.getLogger(__name__)
 
 QDRANT_CONNECT_ATTEMPTS = 6
 QDRANT_RETRY_SECONDS = 5.0
+META_DOC_ID = "_meta"
 
 
 class IngestError(Exception):
-    """A failure that stops a whole ingestion run (Qdrant or the wiki unreachable)."""
+    """A failure that stops a whole run: a service unreachable, a credential
+    that can see too much, or a canary where it must never be."""
 
 
-# ---------------------------------------------------------------------------
-# Context builder
-# ---------------------------------------------------------------------------
+@dataclass
+class Counts:
+    seen: int = 0
+    added: int = 0
+    updated: int = 0
+    unchanged: int = 0
+    deleted: int = 0
+    flagged: int = 0
+    quarantined: int = 0
+    skipped: int = 0
+    errors: int = 0
+
+    def as_dict(self) -> dict[str, int]:
+        return dict(self.__dict__)
 
 
-def build_context(chunk: Chunk, page_title: str, page_description: str) -> str:
-    """
-    Build an enriched context string for LLM consumption.
-
-    Includes page title, description, and section breadcrumb so the LLM
-    knows *where* this chunk comes from without the chatbot needing to
-    reconstruct that from individual payload fields.
-    """
-    parts: list[str] = []
-    if page_title:
-        parts.append(f"Page: {page_title}")
-    if page_description:
-        parts.append(f"Summary: {page_description}")
-    if chunk.section_breadcrumb:
-        parts.append(f"Section: {chunk.section_breadcrumb}")
-
-    if parts:
-        return f"[{' | '.join(parts)}]\n\n{chunk.text}"
-    return chunk.text
+@dataclass
+class Listed:
+    meta: JSON
+    tier: str
 
 
-# ---------------------------------------------------------------------------
-# Payload builder with parent/prev/next references
-# ---------------------------------------------------------------------------
+def page_url(settings: Settings, locale: str, path: str) -> str:
+    path = path.strip("/")
+    if locale and locale != settings.wiki_default_locale:
+        return f"{settings.wiki_url}/{locale}/{path}"
+    return f"{settings.wiki_url}/{path}"
 
 
-def build_payloads(chunks: list[Chunk], page: JSON, page_url: str, parent_chunk_size: int) -> list[JSON]:
-    """
-    Build payload dicts for each chunk.
-
-    Assigns UUIDs per chunk and cross-references:
-      - prev_chunk_id / next_chunk_id  for sequential traversal
-      - parent_chunk_index             index of the "parent" chunk in a
-                                       coarser-grained view (every Nth chunk)
-    """
-    page_title = page.get("title") or ""
-    page_description = page.get("description") or ""
-    tags = [t["tag"] for t in (page.get("tags") or [])]
-    updated_at = page.get("updatedAt") or ""
-
-    chunk_ids = [str(uuid.uuid4()) for _ in chunks]
-
-    payloads: list[JSON] = []
-    for i, chunk in enumerate(chunks):
-        payloads.append(
-            {
-                "chunk_id": chunk_ids[i],
-                "text": chunk.text,
-                "context": build_context(chunk, page_title, page_description),
-                "chunk_index": chunk.chunk_index,
-                "section": chunk.section,
-                "section_breadcrumb": chunk.section_breadcrumb,
-                "content_hash": chunk.content_hash,
-                "page_path": page["path"],
-                "page_title": page_title,
-                "page_url": page_url,
-                "description": page_description,
-                "tags": tags,
-                "updated_at": updated_at,
-                "prev_chunk_id": chunk_ids[i - 1] if i > 0 else None,
-                "next_chunk_id": chunk_ids[i + 1] if i < len(chunks) - 1 else None,
-                "parent_chunk_index": (i // parent_chunk_size) * parent_chunk_size,
-                "total_chunks": len(chunks),
-            }
-        )
-    return payloads
+def is_excluded(settings: Settings, path: str) -> bool:
+    path = path.strip("/")
+    return any(path == p or path.startswith(p + "/") for p in settings.wiki_excluded_paths)
 
 
-# ---------------------------------------------------------------------------
-# Wiki metadata generation
-# ---------------------------------------------------------------------------
+def list_tiers(settings: Settings, anon: WikiClient, member: WikiClient | None) -> dict[int, Listed]:
+    """Every page either crawl can see, with its tier."""
+    member_pages = member.list_pages() if member else []
+    try:
+        anon_pages = anon.list_pages()
+    except WikiClientError as exc:
+        if member is None:
+            raise IngestError(f"Anonymous crawl can't list pages: {exc}") from exc
+        logger.warning("Anonymous GraphQL listing failed (%s); checking each page as a guest instead.", exc)
+        anon_pages = [
+            p
+            for p in member_pages
+            if anon.guest_can_view(page_url(settings, p.get("locale") or "", p.get("path") or ""))
+        ]
+    listed: dict[int, Listed] = {}
+    for p in anon_pages:
+        listed[int(p["id"])] = Listed(p, "public")
+    for p in member_pages:
+        listed.setdefault(int(p["id"]), Listed(p, "member"))
+    excluded = [pid for pid, item in listed.items() if is_excluded(settings, item.meta.get("path") or "")]
+    for pid in excluded:
+        del listed[pid]
+    if excluded:
+        logger.info("Skipped %d pages under excluded paths", len(excluded))
+    return listed
 
 
-def _parse_dt(s: str) -> datetime | None:
-    if not s:
+def _check_canaries(settings: Settings, page: JSON, tier: str) -> None:
+    body = f"{page.get('title', '')}\n{page.get('content', '')}\n{page.get('render', '')}"
+    for canary in settings.canary_admin:
+        if canary in body:
+            raise IngestError(
+                f"Admin canary found in page {page.get('id')} ({page.get('path')}) via the {tier} crawl: "
+                "that crawl's credentials can read admin pages. Run stopped; the page was not staged."
+            )
+    if tier == "public":
+        for canary in settings.canary_member:
+            if canary in body:
+                raise IngestError(
+                    f"Member canary found in page {page.get('id')} ({page.get('path')}) via the anonymous crawl: "
+                    "guests can read member pages. Run stopped; the page was not staged."
+                )
+
+
+def _tags(page: JSON, meta: JSON) -> list[str]:
+    tags = page.get("tags") or meta.get("tags") or []
+    return [str(t["tag"] if isinstance(t, dict) else t) for t in tags]
+
+
+def _redact(text: str) -> str:
+    return sanitize.scan_secrets(text)[0]
+
+
+def build_staged(settings: Settings, page: JSON, meta: JSON, tier: str) -> tuple[StagedPage, list[Link], list[Any]]:
+    """Normalize and sanitize a fetched page. Returns the staged page, its
+    outbound links and the secret-scanner hits."""
+    locale = page.get("locale") or meta.get("locale") or ""
+    path = (page.get("path") or meta.get("path") or "").strip("/")
+    content_type = (page.get("contentType") or "markdown").lower()
+    raw = page.get("content") or ""
+    render = page.get("render") or (raw if content_type == "html" else "")
+    markdown = sanitize.scrub_network_identifiers(content.page_markdown(content_type, raw, render))
+    markdown, hits = sanitize.scan_secrets(markdown)
+    staged = StagedPage(
+        source_id=str(page.get("id") or meta["id"]),
+        locale=locale,
+        path=path,
+        parent_path=path.rsplit("/", 1)[0] if "/" in path else "",
+        title=page.get("title") or meta.get("title") or path,
+        description=page.get("description") or meta.get("description") or "",
+        tags=_tags(page, meta),
+        tier=tier,
+        url=page_url(settings, locale, path),
+        content_type=content_type,
+        raw_content=_redact(raw),
+        rendered_html=_redact(render),
+        toc=page.get("toc") or "",
+        text=markdown,
+        content_hash=text_hash(markdown),
+        flags=["secret-redacted"] if hits else [],
+        created_at=page.get("createdAt") or meta.get("createdAt") or "",
+        updated_at=page.get("updatedAt") or meta.get("updatedAt") or "",
+    )
+    if page.get("scraped"):
+        staged.flags.append("html-scrape")
+    return staged, content.extract_links(staged.rendered_html, settings.wiki_url), hits
+
+
+def index_key(page: StagedPage, items: list[StagedAttachment]) -> str:
+    parts = [page.content_hash, page.tier, *sorted(f"{a.url}:{a.tier}:{a.content_hash}" for a in items)]
+    return hashlib.sha256("\0".join(parts).encode()).hexdigest()
+
+
+def _iso(value: str) -> str | None:
+    if not value:
         return None
     try:
-        return datetime.fromisoformat(s.replace("Z", "+00:00"))
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).isoformat()
     except ValueError:
         return None
 
 
-def _meta_chunk(text: str, label: str, title: str, path: str, wiki_url: str, section: str, meta_type: str) -> JSON:
-    return {
-        "text": text,
-        "context": f"[Wiki Metadata | {label}]\n\n{text}",
-        "page_title": title,
-        "page_path": path,
-        "page_url": wiki_url,
-        "section": section,
-        "meta_type": meta_type,
-    }
+class Pipeline:
+    def __init__(
+        self,
+        settings: Settings,
+        staging: Staging,
+        store: VectorStore,
+        embedder: OpenAIEmbedder,
+        llm: LLM | None,
+        run_id: str,
+    ) -> None:
+        self.settings = settings
+        self.staging = staging
+        self.store = store
+        self.embedder = embedder
+        self.llm = llm
+        self.run_id = run_id
+        self.enricher = Enricher(llm, load_topics(settings.topics_file))
+        self.linker = Linker(staging, llm)
+        self.titles: dict[tuple[str, str], str] = {}
+
+    # -- helpers ----------------------------------------------------------
+
+    def collections(self) -> tuple[str, str]:
+        q = self.settings.qdrant
+        return q.public_collection, q.member_collection
+
+    def _breadcrumb(self, page: StagedPage) -> list[str]:
+        parts = page.path.split("/")
+        crumbs = [self.titles.get((page.locale, "/".join(parts[: i + 1])), parts[i]) for i in range(len(parts) - 1)]
+        return [*crumbs, page.title]
+
+    def remove_doc(self, doc_id: str) -> None:
+        for collection in self.collections():
+            self.store.delete_doc(collection, SOURCE, doc_id)
+        self.staging.clear_entity_documents([doc_id])
+
+    def _gate(self, review_id: str, content_hash: str, page: StagedPage, title: str, text: str) -> str | None:
+        """None if this member-tier text may be indexed, else why not."""
+        status = self.staging.review_status(review_id, content_hash)
+        if status == "approved":
+            return None
+        if status is not None:
+            return f"in the review queue ({status})"
+        reason = self.enricher.exclusion(title, text)  # LLMError propagates: fail closed
+        if reason:
+            self.staging.queue_for_review(review_id, content_hash, title, page.url, reason)
+        return reason
+
+    # -- indexing a staged page ---------------------------------------------
+
+    def index_page(self, page: StagedPage) -> str:
+        """Index one staged page into the collections. Returns "indexed" or
+        "flagged". Raises on LLM, embedding or store failure."""
+        items = self.staging.attachments_for(page.source_id)
+        if page.tier == "member":
+            reason = self._gate(page.source_id, page.content_hash, page, page.title, page.text)
+            if reason:
+                logger.warning("  Page %s held back: %s", page.source_id, reason)
+                self.remove_doc(page.source_id)
+                self.staging.mark_indexed(page.source_id, "")
+                return "flagged"
+        kept: list[StagedAttachment] = []
+        for item in items:
+            if not item.pages:
+                continue
+            if item.tier == "member":
+                review_id = f"{page.source_id}:attachment:{item.url}"
+                text = "\n\n".join(item.pages)
+                reason = self._gate(
+                    review_id, item.content_hash or text_hash(text), page, f"{page.title}: {item.url}", text
+                )
+                if reason:
+                    logger.warning("  Attachment %s held back: %s", item.url, reason)
+                    continue
+            kept.append(item)
+
+        kind = self.enricher.page_kind(page)
+        if kind != page.page_kind:
+            page.page_kind = kind
+            self.staging.set_page_kind(page.source_id, kind)
+        summary = self.enricher.summary(page)
+        topics = self.enricher.page_topics(page, summary)
+        page_links, roles = self.linker.link_page(kind, page.title, page.path, page.tags)
+        crumbs = self._breadcrumb(page)
+        now = datetime.now(UTC).isoformat()
+
+        base: dict[str, Any] = {
+            "source": SOURCE,
+            "doc_id": page.source_id,
+            "title": page.title,
+            "tier": page.tier,
+            "authority": authority(kind),
+            "created_at": _iso(page.created_at),
+            "updated_at": _iso(page.updated_at),
+            "indexed_at": now,
+            "stale_after": None,
+            "superseded_by": None,
+            "sync_run_id": self.run_id,
+            "topics": topics,
+            "lang": page.locale,
+            "page": None,
+            "page_kind": kind,
+            "path": page.path,
+            "locale": page.locale,
+            "tags": page.tags,
+            "description": page.description,
+            "machine_generated": False,
+        }
+
+        def payload(chunk_kind: str, text: str, context: str, heading_path: str, url: str, **extra: Any) -> JSON:
+            links = page_links.merged(self.linker.link(text))
+            return {
+                **base,
+                "chunk_kind": chunk_kind,
+                "text": text,
+                "context": context,
+                "heading_path": heading_path,
+                "url": url,
+                "content_hash": text_hash(text),
+                **links.payload(),
+                "section": self.linker.section(links),
+                **extra,
+            }
+
+        payloads: list[JSON] = [
+            payload(
+                "summary",
+                summary,
+                f'Summary of the wiki page "{page.title}" ({kind}).',
+                " > ".join(crumbs),
+                page.url,
+            )
+        ]
+        sizes = (
+            self.settings.chunk_target_tokens,
+            self.settings.chunk_max_tokens,
+            self.settings.chunk_overlap_tokens,
+        )
+        for chunk in chunk_markdown(page.text, content.heading_anchors(page.rendered_html), *sizes):
+            headings = chunk.headings
+            if headings and headings[0].strip().lower() == page.title.strip().lower():
+                headings = headings[1:]
+            heading_path = " > ".join(crumbs + headings)
+            url = f"{page.url}#{chunk.anchor}" if chunk.anchor else page.url
+            context = self.enricher.context(page, summary, heading_path, chunk.text)
+            payloads.append(payload("chunk", chunk.text, context, heading_path, url))
+
+        for item in kept:
+            name = item.url.rsplit("/", 1)[-1]
+            title = f"{page.title}: {name}"
+            if item.kind == "image":
+                label = " ".join(x for x in (item.alt, item.caption) if x)
+                text = f"[Image{': ' + label if label else ''}, machine-generated description]\n{item.pages[0]}"
+                context = f'An image on the wiki page "{page.title}", described by a vision model.'
+                payloads.append(
+                    payload(
+                        "image", text, context, " > ".join(crumbs), item.url, tier=item.tier, machine_generated=True
+                    )
+                )
+                continue
+            for number, page_text in enumerate(item.pages, 1):
+                text = sanitize.scan_secrets(page_text)[0]
+                for chunk in chunk_markdown(text, None, *sizes):
+                    where = f"page {number}" if item.kind == "pdf" else ""
+                    heading_path = " > ".join([*crumbs, name, *([where] if where else [])])
+                    url = f"{item.url}#page={number}" if item.kind == "pdf" else item.url
+                    context = f'From {name}{", " + where if where else ""}, attached to the wiki page "{page.title}".'
+                    payloads.append(
+                        payload(
+                            "attachment",
+                            chunk.text,
+                            context,
+                            heading_path,
+                            url,
+                            tier=item.tier,
+                            title=title,
+                            page=number if item.kind == "pdf" else None,
+                        )
+                    )
+
+        for i, p in enumerate(payloads):
+            p["chunk_index"] = i
+            p["id"] = point_id(SOURCE, page.source_id, i)
+
+        vectors = self.embedder.encode_documents(
+            [f"{p['context']}\n\n{p['text']}" for p in payloads], batch_size=self.settings.batch_size
+        )
+        public, member = self.collections()
+        if page.tier == "public":
+            keep = [(v, p) for v, p in zip(vectors, payloads, strict=True) if p["tier"] == "public"]
+            self.store.replace_doc(public, SOURCE, page.source_id, [v for v, _ in keep], [p for _, p in keep])
+        else:
+            self.store.delete_doc(public, SOURCE, page.source_id)
+        self.store.replace_doc(member, SOURCE, page.source_id, vectors, payloads)
+        self.staging.set_entity_documents(page.source_id, page.url, roles)
+        self.staging.mark_indexed(page.source_id, index_key(page, items))
+        logger.info("  Indexed %d points (%s, %s)", len(payloads), page.tier, kind)
+        return "indexed"
+
+    # -- wiki-level metadata ------------------------------------------------
+
+    def index_metadata(self) -> None:
+        pages = self.staging.live_pages()
+        public, member = self.collections()
+        for collection, tier_pages, tier in (
+            (public, [p for p in pages if p.tier == "public"], "public"),
+            (member, pages, "member"),
+        ):
+            payloads = build_wiki_metadata(tier_pages, self.settings.wiki_url, tier, self.run_id)
+            vectors = self.embedder.encode_documents(
+                [f"{p['context']}\n\n{p['text']}" for p in payloads], batch_size=self.settings.batch_size
+            )
+            self.store.replace_doc(collection, SOURCE, META_DOC_ID, vectors, payloads)
 
 
 def _plural(count: int) -> str:
     return f"{count} page{'s' if count != 1 else ''}"
 
 
-def build_wiki_metadata(
-    pages: list[JSON],
-    wiki_url: str,
-    all_tags: Counter[str] | None = None,
-    page_extra: dict[int, JSON] | None = None,
-) -> list[JSON]:
-    """
-    Derive wiki-level metadata from the page list.
+def build_wiki_metadata(pages: list[StagedPage], wiki_url: str, tier: str, run_id: str) -> list[JSON]:
+    """Points describing the wiki itself (counts, tags, recent and new pages,
+    a page listing), built only from pages of the collection's tier. No
+    names of people: user lists are never ingested."""
+    audience = "public" if tier == "public" else "public and member-only"
+    dated = [(p, dt) for p in pages if (dt := _parse_dt(p.updated_at))]
+    created = [(p, dt) for p in pages if (dt := _parse_dt(p.created_at))]
+    tags: Counter[str] = Counter(t for p in pages for t in p.tags)
+    texts: list[tuple[str, str]] = []
 
-    *all_tags* is a Counter of tag→count collected during page ingestion
-    (since the list query doesn't include tags).
-
-    *page_extra* maps page_id → dict with keys like ``authorName`` and
-    ``createdAt`` gathered from individual get_page calls (these fields
-    aren't available on the list query).
-
-    Returns a list of metadata chunk dicts, each with a 'text' field suitable
-    for embedding and a 'context' field for LLM grounding.
-    """
-    page_extra = page_extra or {}
-    all_tags = all_tags or Counter()
-
-    # Merge per-page details into the list entries
-    for p in pages:
-        extra = page_extra.get(p["id"], {})
-        for key in ("authorName", "createdAt"):
-            if key not in p and key in extra:
-                p[key] = extra[key]
-
-    total_pages = len(pages)
-
-    authors = Counter(str(p["authorName"]) for p in pages if p.get("authorName"))
-    num_contributors = len(authors)
-    top_tags = all_tags.most_common(20)
-
-    pages_with_updated = [(p, dt) for p in pages if (dt := _parse_dt(p.get("updatedAt", "")))]
-    pages_with_updated.sort(key=lambda x: x[1], reverse=True)
-    pages_with_created = [(p, dt) for p in pages if (dt := _parse_dt(p.get("createdAt", "")))]
-    pages_with_created.sort(key=lambda x: x[1])
-
-    recently_updated = pages_with_updated[:10]
-    newest_pages = sorted(pages_with_created, key=lambda x: x[1], reverse=True)[:10]
-
-    chunks: list[JSON] = []
-
-    overview_lines = [
+    overview = [
         f"Wiki statistics and overview for {wiki_url}",
-        f"Total public pages: {total_pages}",
-        f"Number of contributors: {num_contributors}",
-        f"Number of unique tags: {len(all_tags)}",
+        f"Total {audience} pages: {len(pages)}",
+        f"Number of unique tags: {len(tags)}",
     ]
-    if pages_with_updated:
-        page, dt = pages_with_updated[0]
-        overview_lines.append(f'Most recently updated page: "{page.get("title", "")}" on {dt:%Y-%m-%d}')
-    if pages_with_created:
-        page, dt = pages_with_created[0]
-        overview_lines.append(f'Oldest page: "{page.get("title", "")}" created on {dt:%Y-%m-%d}')
-    chunks.append(
-        _meta_chunk(
-            "\n".join(overview_lines), "Overview", "Wiki Statistics", "_meta/overview", wiki_url, "Overview", "overview"
-        )
-    )
+    if dated:
+        p, dt = max(dated, key=lambda x: x[1])
+        overview.append(f'Most recently updated page: "{p.title}" on {dt:%Y-%m-%d}')
+    if created:
+        p, dt = min(created, key=lambda x: x[1])
+        overview.append(f'Oldest page: "{p.title}" created on {dt:%Y-%m-%d}')
+    texts.append(("overview", "\n".join(overview)))
+    if tags:
+        lines = [f"Wiki tags and topics ({len(tags)} unique tags):"]
+        lines += [f"  - {tag}: {_plural(n)}" for tag, n in tags.most_common(20)]
+        texts.append(("tags", "\n".join(lines)))
+    if dated:
+        lines = ["Recently updated wiki pages:"]
+        lines += [f'  - "{p.title}" updated on {dt:%Y-%m-%d}' for p, dt in sorted(dated, key=lambda x: x[1])[::-1][:10]]
+        texts.append(("recent", "\n".join(lines)))
+    if created:
+        lines = ["Newest wiki pages (most recently created):"]
+        lines += [
+            f'  - "{p.title}" created on {dt:%Y-%m-%d}' for p, dt in sorted(created, key=lambda x: x[1])[::-1][:10]
+        ]
+        texts.append(("newest", "\n".join(lines)))
+    listing = [f"Complete list of all {len(pages)} {audience} wiki pages:"]
+    listing += [f"  - {p.title or 'Untitled'} ({p.path})" for p in sorted(pages, key=lambda x: (x.locale, x.path))]
+    texts.append(("page_listing", "\n".join(listing)))
 
-    contrib_lines = [f"Wiki contributors ({num_contributors} total):"]
-    contrib_lines += [f"  - {author}: {_plural(count)}" for author, count in authors.most_common(10)]
-    chunks.append(
-        _meta_chunk(
-            "\n".join(contrib_lines),
-            "Contributors",
-            "Wiki Contributors",
-            "_meta/contributors",
-            wiki_url,
-            "Contributors",
-            "contributors",
-        )
-    )
+    now = datetime.now(UTC).isoformat()
+    return [
+        {
+            "id": point_id(SOURCE, META_DOC_ID, i),
+            "source": SOURCE,
+            "doc_id": META_DOC_ID,
+            "chunk_index": i,
+            "chunk_kind": "meta",
+            "meta_type": meta_type,
+            "title": f"Wiki {meta_type.replace('_', ' ')}",
+            "heading_path": "Wiki metadata",
+            "text": text,
+            "context": f"Statistics about the wiki itself ({meta_type.replace('_', ' ')}).",
+            "url": wiki_url,
+            "tier": tier,
+            "authority": 4,
+            "created_at": None,
+            "updated_at": now,
+            "indexed_at": now,
+            "stale_after": None,
+            "superseded_by": None,
+            "content_hash": text_hash(text),
+            "sync_run_id": run_id,
+            "asset_ids": [],
+            "location_ids": [],
+            "work_ids": [],
+            "event_ids": [],
+            "training_ids": [],
+            "topics": [],
+            "section": None,
+            "page": None,
+            "lang": "",
+        }
+        for i, (meta_type, text) in enumerate(texts)
+    ]
 
-    if top_tags:
-        tags_lines = [f"Wiki tags and topics ({len(all_tags)} unique tags):"]
-        tags_lines += [f"  - {tag}: {_plural(count)}" for tag, count in top_tags]
-        chunks.append(
-            _meta_chunk(
-                "\n".join(tags_lines), "Tags and Topics", "Wiki Tags and Topics", "_meta/tags", wiki_url, "Tags", "tags"
-            )
-        )
 
-    def _dated_lines(header: str, verb: str, entries: list[tuple[JSON, datetime]]) -> str:
-        lines = [header]
-        for p, dt in entries:
-            title = p.get("title") or p.get("path") or "Untitled"
-            line = f'  - "{title}" {verb} on {dt:%Y-%m-%d}'
-            if author := p.get("authorName"):
-                line += f" by {author}"
-            lines.append(line)
-        return "\n".join(lines)
-
-    if recently_updated:
-        text = _dated_lines("Recently updated wiki pages:", "updated", recently_updated)
-        chunks.append(
-            _meta_chunk(
-                text,
-                "Recently Updated",
-                "Recently Updated Pages",
-                "_meta/recent",
-                wiki_url,
-                "Recently Updated",
-                "recent",
-            )
-        )
-
-    if newest_pages:
-        text = _dated_lines("Newest wiki pages (most recently created):", "created", newest_pages)
-        chunks.append(
-            _meta_chunk(text, "Newest Pages", "Newest Wiki Pages", "_meta/newest", wiki_url, "Newest Pages", "newest")
-        )
-
-    # Page listing chunk (all pages with paths, for "what pages exist" questions)
-    listing_lines = [f"Complete list of all {total_pages} public wiki pages:"]
-    for p in sorted(pages, key=lambda x: str(x.get("path", ""))):
-        listing_lines.append(f"  - {p.get('title') or 'Untitled'} ({p.get('path') or ''})")
-    chunks.append(
-        _meta_chunk(
-            "\n".join(listing_lines),
-            "Page Listing",
-            "All Wiki Pages",
-            "_meta/pages",
-            wiki_url,
-            "Page Listing",
-            "page_listing",
-        )
-    )
-
-    return chunks
+def _parse_dt(value: str) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 # ---------------------------------------------------------------------------
-# Main ingestion run
+# Runs
 # ---------------------------------------------------------------------------
 
 
-def connect_store(settings: Settings, dimension: int, stop: threading.Event) -> VectorStore:
-    """Connect to Qdrant, retrying while it starts up."""
+def connect_store(settings: Settings, embedder: OpenAIEmbedder, stop: threading.Event) -> VectorStore:
+    """Connect to Qdrant, retrying while it starts up, and check both collections."""
     q = settings.qdrant
     logger.info("Connecting to Qdrant at %s:%d …", q.host, q.port)
     for attempt in range(1, QDRANT_CONNECT_ATTEMPTS + 1):
         try:
-            return VectorStore(q.host, q.port, q.collection, dimension)
+            store = VectorStore(q.host, q.port, settings.embedding.model, embedder.dimension)
+            store.ensure_collection(q.public_collection, "public")
+            store.ensure_collection(q.member_collection, "member")
+            return store
+        except StoreError as exc:
+            raise IngestError(str(exc)) from exc
         except Exception as exc:  # qdrant-client raises several transport errors
             if attempt == QDRANT_CONNECT_ATTEMPTS or stop.is_set():
                 raise IngestError(f"Cannot connect to Qdrant: {exc}") from exc
@@ -294,135 +521,222 @@ def connect_store(settings: Settings, dimension: int, stop: threading.Event) -> 
     raise AssertionError("unreachable")  # pragma: no cover
 
 
-def run(settings: Settings, stop: threading.Event | None = None) -> bool:
-    """
-    One ingestion pass. Returns True if every page was processed without
-    error. Raises :class:`IngestError` if the run can't proceed at all.
-    Stops early, between pages, once *stop* is set.
-    """
-    stop = stop or threading.Event()
-    embedder = settings.embedding.embedder()
-    store = connect_store(settings, embedder.dimension, stop)
-    wiki_url = settings.wiki_url
+def _new_run_id() -> str:
+    return f"{datetime.now(UTC):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:8]}"
 
-    with WikiClient(wiki_url, settings.wiki_api_key) as wiki:
-        logger.info("wikijs2rag %s  -  fetching public page list from %s …", __version__, wiki_url)
+
+def full_run_due(settings: Settings, staging: Staging) -> bool:
+    last = staging.last_full_finished_at()
+    if last is None:
+        return True
+    return (datetime.now(UTC) - last).total_seconds() >= settings.reconcile_interval
+
+
+def run(
+    settings: Settings,
+    stop: threading.Event | None = None,
+    full: bool | None = None,
+    reindex: bool = False,
+) -> bool:
+    """One sync run. Returns True if every page was processed without error.
+    Raises :class:`IngestError` if the run can't proceed at all. *full* None
+    means a full reconcile if one is due. Stops early, between pages, once
+    *stop* is set."""
+    stop = stop or threading.Event()
+    staging = Staging(settings.database_url)
+    try:
+        with staging.source_lock() as locked:
+            if not locked:
+                logger.warning("Another wikijs2rag run holds the wiki lock; skipping this run.")
+                return True
+            if full is None:
+                full = settings.force_reingest or full_run_due(settings, staging)
+            kind = "reindex" if reindex else "full" if full else "incremental"
+            run_id = _new_run_id()
+            staging.start_run(run_id, kind)
+            counts = Counts()
+            try:
+                ok = _run(settings, staging, run_id, kind, stop, counts)
+            except Exception as exc:
+                staging.finish_run(run_id, kind, False, counts.as_dict(), str(exc))
+                raise
+            staging.finish_run(run_id, kind, ok, counts.as_dict())
+            logger.info("Run %s (%s) done: %s", run_id, kind, " ".join(f"{k}={v}" for k, v in counts.as_dict().items()))
+            return ok
+    finally:
+        staging.close()
+
+
+def _run(settings: Settings, staging: Staging, run_id: str, kind: str, stop: threading.Event, counts: Counts) -> bool:
+    embedder = settings.embedding.embedder()
+    store = connect_store(settings, embedder, stop)
+    llm = (
+        LLM(staging, settings.llm.base_url, settings.llm.model, settings.llm.api_key, settings.llm.vision_model)
+        if settings.llm.model
+        else None
+    )
+    pipeline = Pipeline(settings, staging, store, embedder, llm, run_id)
+    try:
+        if kind == "reindex":
+            completed = _reindex(pipeline, stop, counts)
+        else:
+            completed = _crawl(pipeline, kind == "full", stop, counts)
+        if not completed:
+            return False
+        pipeline.index_metadata()
+        if kind != "incremental":
+            _reconcile(pipeline, kind, counts)
+    finally:
+        if llm:
+            llm.close()
+    return counts.errors == 0
+
+
+def _reindex(pipeline: Pipeline, stop: threading.Event, counts: Counts) -> bool:
+    pages = pipeline.staging.live_pages()
+    pipeline.titles = {(p.locale, p.path): p.title for p in pages}
+    logger.info("wikijs2rag %s - rebuilding %d pages from staging", __version__, len(pages))
+    for page in pages:
+        if stop.is_set():
+            return False
+        counts.seen += 1
+        _index(pipeline, page, counts, "updated")
+    return True
+
+
+def _index(pipeline: Pipeline, page: StagedPage, counts: Counts, label: str) -> None:
+    try:
+        result = pipeline.index_page(page)
+    except Exception as exc:  # LLM, embeddings or Qdrant failure: retried next run
+        logger.error("  Could not index page %s: %s", page.source_id, exc)
+        counts.errors += 1
+        return
+    if result == "flagged":
+        counts.flagged += 1
+    elif label == "added":
+        counts.added += 1
+    else:
+        counts.updated += 1
+
+
+def _crawl(pipeline: Pipeline, full: bool, stop: threading.Event, counts: Counts) -> bool:
+    settings, staging = pipeline.settings, pipeline.staging
+    key = settings.wiki_member_api_key
+    with WikiClient(settings.wiki_url) as anon, WikiClient(settings.wiki_url, key) if key else nullcontext() as member:
+        for client in (anon, member):
+            if client is not None and client.has_admin_rights():
+                raise IngestError(
+                    f"The {'member' if client.authenticated else 'anonymous'} credentials have admin rights "
+                    "(they can list API keys). Use a key scoped to the members group; never a full-access key."
+                )
+        logger.info("wikijs2rag %s - %s crawl of %s", __version__, "full" if full else "incremental", settings.wiki_url)
         try:
-            pages = wiki.list_public_pages()
+            listed = list_tiers(settings, anon, member)
         except WikiClientError as exc:
             raise IngestError(f"Failed to list pages: {exc}") from exc
-
-        if not pages:
-            logger.warning("No public pages found - nothing to do.")
-            return True
-
-        total = len(pages)
-        ok = skipped = unchanged = errors = 0
-        collected_tags: Counter[str] = Counter()
-        page_extra: dict[int, JSON] = {}
-
-        for i, meta in enumerate(pages, 1):
+        pipeline.titles = {
+            (item.meta.get("locale") or "", (item.meta.get("path") or "").strip("/")): item.meta.get("title") or ""
+            for item in listed.values()
+        }
+        states = staging.page_states()
+        seen: list[str] = []
+        total = len(listed)
+        for n, (page_id, item) in enumerate(sorted(listed.items()), 1):
             if stop.is_set():
-                logger.info("Stop requested; ending run after %d of %d pages.", i - 1, total)
-                return errors == 0
-
-            page_id: int = meta["id"]
-            title = meta.get("title") or meta.get("path") or str(page_id)
-            logger.info("[%d/%d] Processing page %d: %s", i, total, page_id, title)
-
-            # --- Incremental: skip if updatedAt hasn't changed ---
-            if not settings.force_reingest:
-                stored_ts = store.get_page_updated_at(page_id)
-                wiki_ts = meta.get("updatedAt") or ""
-                if stored_ts and wiki_ts and stored_ts == wiki_ts:
-                    logger.debug("  Page %d unchanged (updatedAt=%s), skipping.", page_id, wiki_ts)
-                    unchanged += 1
-                    continue
-
-            try:
-                page = wiki.get_page(page_id, meta=meta)
-            except WikiClientError as exc:
-                logger.error("  Could not fetch page %d: %s", page_id, exc)
-                errors += 1
-                continue
-
-            if not page or not (page.get("content") or "").strip():
-                logger.debug("  Page %d has no content, skipping.", page_id)
-                skipped += 1
-                continue
-
-            page_extra[page_id] = {
-                "authorName": page.get("authorName") or "",
-                "createdAt": page.get("createdAt") or "",
-            }
-            for t in page.get("tags") or []:
-                collected_tags[t["tag"] if isinstance(t, dict) else t] += 1
-
-            chunks = chunk_page(
-                page["content"],
-                content_type=(page.get("contentType") or "markdown").lower(),
-                chunk_size=settings.chunk_size,
-                chunk_overlap=settings.chunk_overlap,
+                logger.info("Stop requested; ending run after %d of %d pages.", n - 1, total)
+                staging.mark_seen(seen, pipeline.run_id)
+                return False
+            sid = str(page_id)
+            seen.append(sid)
+            counts.seen += 1
+            state = states.get(sid)
+            if state and state[1] == "public" and item.tier == "member":
+                # Restricted at the source: out of the public collection now,
+                # whatever happens to the rest of this page's processing.
+                pipeline.store.delete_doc(settings.qdrant.public_collection, SOURCE, sid)
+            changed = (
+                settings.force_reingest
+                or full
+                or state is None
+                or state[3]  # deleted
+                or state[0] != (item.meta.get("updatedAt") or "")
+                or state[1] != item.tier
+                or not state[2]  # never indexed, or held back
             )
-            if not chunks:
-                logger.debug("  Page %d produced no chunks, skipping.", page_id)
-                skipped += 1
+            if not changed:
+                counts.unchanged += 1
                 continue
-
+            logger.info("[%d/%d] %s page %s: %s", n, total, item.tier, sid, item.meta.get("path"))
+            # Member-tier pages only come from the member crawl, so member is set.
+            client = anon if item.tier == "public" or member is None else member
             try:
-                vectors = embedder.encode_documents([c.text for c in chunks], batch_size=settings.batch_size)
-            except Exception as exc:  # httpx or unexpected-response errors; keep going
-                logger.error("  Embedding failed for page %d: %s", page_id, exc)
-                errors += 1
+                page = client.get_page(page_id, meta=item.meta)
+            except WikiClientError as exc:
+                logger.error("  Could not fetch page %s: %s", sid, exc)
+                counts.errors += 1
                 continue
-
-            page_url = f"{wiki_url}/{page['path'].lstrip('/')}"
-            payloads = build_payloads(chunks, page, page_url, settings.parent_ratio)
-
-            try:
-                store.upsert_page_chunks(page_id, vectors, payloads)
-            except Exception as exc:  # qdrant-client transport errors; keep going
-                logger.error("  Store failed for page %d: %s", page_id, exc)
-                errors += 1
+            if not page or not ((page.get("content") or "").strip() or (page.get("render") or "").strip()):
+                counts.skipped += 1
+                pipeline.remove_doc(sid)
                 continue
-
-            ok += 1
+            _check_canaries(settings, page, item.tier)
+            staged, links, hits = build_staged(settings, page, item.meta, item.tier)
+            crawls: list[tuple[WikiClient, str]] = [(client, item.tier)]
+            if item.tier == "public" and member is not None:
+                crawls.append((member, "member"))
+            files = attachments.collect(
+                crawls, staged.rendered_html, settings.wiki_url, settings.attachment_max_bytes, pipeline.llm
+            )
+            for f in files:
+                _check_canaries(settings, {"id": sid, "path": f.url, "content": "\n".join(f.pages)}, f.tier)
+                cleaned = [sanitize.scan_secrets(t) for t in f.pages]
+                f.pages = [c[0] for c in cleaned]
+                for _text, file_hits in cleaned:
+                    for hit in file_hits:
+                        staging.quarantine_hit(sid, f.url, hit.rule, hit.line, f.content_hash)
+                        counts.quarantined += 1
+            for hit in hits:
+                staging.quarantine_hit(sid, "page", hit.rule, hit.line, staged.content_hash)
+                counts.quarantined += 1
+            if hits:
+                logger.warning("  Redacted %d secret(s) in page %s; see the quarantine report", len(hits), sid)
+            previous = staging.get_page(sid)
+            staging.stage_page(staged, pipeline.run_id, links)
+            staging.stage_attachments(sid, files)
+            staged.indexed_key = previous.indexed_key if previous else ""
+            if previous and previous.indexed_key == index_key(staged, files) and not settings.force_reingest:
+                counts.unchanged += 1
+                continue
+            _index(pipeline, staged, counts, "added" if state is None else "updated")
             if settings.page_delay > 0:
                 stop.wait(settings.page_delay)
+        staging.mark_seen(seen, pipeline.run_id)
+    return True
 
-    # --- Ingest wiki-level metadata ---
-    logger.info("Building wiki metadata chunks…")
-    meta_chunks = build_wiki_metadata(pages, wiki_url, all_tags=collected_tags, page_extra=page_extra)
-    try:
-        meta_vectors = embedder.encode_documents([mc["text"] for mc in meta_chunks], batch_size=settings.batch_size)
-        now = datetime.now(UTC).isoformat()
-        meta_payloads = [
-            {
-                **mc,
-                "tags": [],
-                "updated_at": now,
-                "description": "",
-                "section_breadcrumb": "",
-                "content_hash": "",
-                "chunk_index": 0,
-                "total_chunks": len(meta_chunks),
-            }
-            for mc in meta_chunks
-        ]
-        store.upsert_meta_chunks(meta_vectors, meta_payloads)
-    except Exception:  # metadata is best-effort; page data is already stored
-        logger.exception("Failed to ingest wiki metadata")
 
-    info = store.collection_info()
+def _reconcile(pipeline: Pipeline, kind: str, counts: Counts) -> None:
+    """Delete this source's points and staged pages that this run didn't see."""
+    staging, store = pipeline.staging, pipeline.store
+    previous = staging.last_full_docs_seen()
+    if kind == "full" and previous and counts.seen < previous / 2:
+        logger.error(
+            "ALERT: this full run saw %d pages but the previous one saw %d. Not deleting anything; "
+            "check the wiki and its credentials.",
+            counts.seen,
+            previous,
+        )
+        counts.errors += 1
+        return
+    gone = staging.mark_unseen_deleted(pipeline.run_id) if kind == "full" else []
+    staging.clear_entity_documents(gone)
+    live = [p for p in staging.live_pages() if p.indexed_key]
+    public, member = pipeline.collections()
+    stamped = 0
+    for collection, docs in ((public, [p for p in live if p.tier == "public"]), (member, live)):
+        for page in docs:
+            store.stamp_doc(collection, SOURCE, page.source_id, pipeline.run_id)
+            stamped += 1
+        counts.deleted += store.delete_stale(collection, SOURCE, pipeline.run_id)
     logger.info(
-        "Done.  pages_ingested=%d  unchanged=%d  skipped=%d  errors=%d  | "
-        "metadata_chunks=%d  collection='%s'  total_chunks=%s",
-        ok,
-        unchanged,
-        skipped,
-        errors,
-        len(meta_chunks),
-        info["name"],
-        info["vectors_count"],
+        "Reconcile: stamped %d docs, deleted %d points, %d pages gone from the wiki", stamped, counts.deleted, len(gone)
     )
-    return errors == 0

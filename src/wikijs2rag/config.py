@@ -91,22 +91,50 @@ def _log_level(env: Mapping[str, str]) -> str:
     return level
 
 
+def _list(env: Mapping[str, str], name: str, default: tuple[str, ...] = ()) -> tuple[str, ...]:
+    """A comma-separated list; blank items dropped."""
+    raw = env.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return tuple(item.strip() for item in raw.split(",") if item.strip())
+
+
+def _tier(env: Mapping[str, str]) -> str:
+    tier = _str(env, "QUERY_TIER", "public").lower()
+    if tier not in ("public", "member"):
+        raise ConfigError(f"QUERY_TIER must be public or member, not {tier!r}")
+    return tier
+
+
 @dataclass(frozen=True)
 class QdrantSettings:
     host: str = "qdrant"
     port: int = 6333
-    collection: str = "wiki"
+    public_collection: str = "hs_public"
+    member_collection: str = "hs_member"
 
     @classmethod
     def from_env(cls, env: Mapping[str, str], default_host: str = "qdrant") -> QdrantSettings:
         port = _int(env, "QDRANT_PORT", cls.port, minimum=1)
         if port > 65535:
             raise ConfigError(f"QDRANT_PORT must be 1-65535, not {port}")
+        if _optional(env, "QDRANT_COLLECTION"):
+            raise ConfigError(
+                "QDRANT_COLLECTION is no longer used; set QDRANT_PUBLIC_COLLECTION and QDRANT_MEMBER_COLLECTION"
+            )
+        public = _str(env, "QDRANT_PUBLIC_COLLECTION", cls.public_collection)
+        member = _str(env, "QDRANT_MEMBER_COLLECTION", cls.member_collection)
+        if public == member:
+            raise ConfigError("QDRANT_PUBLIC_COLLECTION and QDRANT_MEMBER_COLLECTION must differ")
         return cls(
             host=_str(env, "QDRANT_HOST", default_host),
             port=port,
-            collection=_str(env, "QDRANT_COLLECTION", cls.collection),
+            public_collection=public,
+            member_collection=member,
         )
+
+    def collection(self, tier: str) -> str:
+        return self.public_collection if tier == "public" else self.member_collection
 
 
 @dataclass(frozen=True)
@@ -148,40 +176,95 @@ class EmbeddingSettings:
 
 
 @dataclass(frozen=True)
+class LLMSettings:
+    """The generation model, for ingest-time summaries, classification and
+    linking. Reached through the same kind of OpenAI-compatible gateway."""
+
+    base_url: str = "http://localhost:8080/v1"
+    api_key: str | None = None
+    model: str | None = None
+    vision_model: str | None = None
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str]) -> LLMSettings:
+        return cls(
+            base_url=_url(env, "LLM_BASE_URL", _optional(env, "OPENAI_BASE_URL") or cls.base_url),
+            api_key=_optional(env, "LLM_API_KEY") or _optional(env, "OPENAI_API_KEY"),
+            model=_optional(env, "LLM_MODEL"),
+            vision_model=_optional(env, "VISION_MODEL"),
+        )
+
+
+@dataclass(frozen=True)
 class Settings:
     """Settings for the ingestion service (``wikijs2rag``)."""
 
     wiki_url: str
-    wiki_api_key: str | None = None
+    wiki_member_api_key: str | None = None
+    wiki_default_locale: str = "en"
+    wiki_excluded_paths: tuple[str, ...] = ("admin",)
+    database_url: str = "sqlite:///wikijs2rag.db"
     qdrant: QdrantSettings = QdrantSettings()
     embedding: EmbeddingSettings = EmbeddingSettings()
-    chunk_size: int = 256
-    chunk_overlap: int = 50
+    llm: LLMSettings = LLMSettings()
+    topics_file: str | None = None
+    chunk_target_tokens: int = 400
+    chunk_max_tokens: int = 800
+    chunk_overlap_tokens: int = 50
     batch_size: int = 32
     page_delay: float = 0.1
+    attachment_max_bytes: int = 20 * 1024 * 1024
     force_reingest: bool = False
-    parent_ratio: int = 4
     poll_interval: int = 3600
+    reconcile_interval: int = 86400
+    canary_admin: tuple[str, ...] = ()
+    canary_member: tuple[str, ...] = ()
     log_level: str = "INFO"
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] = os.environ) -> Settings:
-        chunk_size = _int(env, "CHUNK_SIZE", cls.chunk_size, minimum=1)
-        chunk_overlap = _int(env, "CHUNK_OVERLAP", cls.chunk_overlap)
-        if chunk_overlap >= chunk_size:
-            raise ConfigError(f"CHUNK_OVERLAP ({chunk_overlap}) must be less than CHUNK_SIZE ({chunk_size})")
+        if _optional(env, "WIKI_API_KEY"):
+            raise ConfigError(
+                "WIKI_API_KEY is no longer used. Public pages are crawled with no credentials; set "
+                "WIKI_MEMBER_API_KEY to a key scoped to the members group (never a full-access key)."
+            )
+        for gone in ("CHUNK_SIZE", "CHUNK_OVERLAP", "PARENT_CHUNK_RATIO"):
+            if _optional(env, gone):
+                raise ConfigError(f"{gone} is no longer used; see CHUNK_TARGET_TOKENS and CHUNK_MAX_TOKENS")
+        target = _int(env, "CHUNK_TARGET_TOKENS", cls.chunk_target_tokens, minimum=50)
+        maximum = _int(env, "CHUNK_MAX_TOKENS", cls.chunk_max_tokens, minimum=50)
+        overlap = _int(env, "CHUNK_OVERLAP_TOKENS", cls.chunk_overlap_tokens)
+        if target > maximum:
+            raise ConfigError(f"CHUNK_TARGET_TOKENS ({target}) must not exceed CHUNK_MAX_TOKENS ({maximum})")
+        if overlap >= target:
+            raise ConfigError(f"CHUNK_OVERLAP_TOKENS ({overlap}) must be less than CHUNK_TARGET_TOKENS ({target})")
+        llm = LLMSettings.from_env(env)
+        member_key = _optional(env, "WIKI_MEMBER_API_KEY")
+        if member_key and not llm.model:
+            raise ConfigError("WIKI_MEMBER_API_KEY needs LLM_MODEL: member pages go through the exclusion classifier")
         return cls(
             wiki_url=_url(env, "WIKI_URL"),
-            wiki_api_key=_optional(env, "WIKI_API_KEY"),
+            wiki_member_api_key=member_key,
+            wiki_default_locale=_str(env, "WIKI_DEFAULT_LOCALE", cls.wiki_default_locale),
+            wiki_excluded_paths=tuple(
+                p.strip("/") for p in _list(env, "WIKI_EXCLUDED_PATHS", cls.wiki_excluded_paths) if p.strip("/")
+            ),
+            database_url=_str(env, "DATABASE_URL", cls.database_url),
             qdrant=QdrantSettings.from_env(env),
             embedding=EmbeddingSettings.from_env(env),
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
+            llm=llm,
+            topics_file=_optional(env, "TOPICS_FILE"),
+            chunk_target_tokens=target,
+            chunk_max_tokens=maximum,
+            chunk_overlap_tokens=overlap,
             batch_size=_int(env, "EMBEDDING_BATCH_SIZE", cls.batch_size, minimum=1),
             page_delay=_float(env, "PAGE_DELAY_SECONDS", cls.page_delay),
+            attachment_max_bytes=_int(env, "ATTACHMENT_MAX_MB", 20, minimum=0) * 1024 * 1024,
             force_reingest=_bool(env, "FORCE_REINGEST", cls.force_reingest),
-            parent_ratio=_int(env, "PARENT_CHUNK_RATIO", cls.parent_ratio, minimum=1),
             poll_interval=_int(env, "POLL_INTERVAL_SECONDS", cls.poll_interval),
+            reconcile_interval=_int(env, "RECONCILE_INTERVAL_SECONDS", cls.reconcile_interval, minimum=60),
+            canary_admin=_list(env, "CANARY_ADMIN"),
+            canary_member=_list(env, "CANARY_MEMBER"),
             log_level=_log_level(env),
         )
 
@@ -192,6 +275,7 @@ class QuerySettings:
 
     qdrant: QdrantSettings = QdrantSettings(host="localhost")
     embedding: EmbeddingSettings = EmbeddingSettings()
+    tier: str = "public"
     limit: int = 5
     show_text: bool = False
     min_score: float = 0.0
@@ -206,6 +290,7 @@ class QuerySettings:
         return cls(
             qdrant=QdrantSettings.from_env(env, default_host="localhost"),
             embedding=EmbeddingSettings.from_env(env),
+            tier=_tier(env),
             limit=_int(env, "QUERY_LIMIT", cls.limit, minimum=1),
             show_text=_bool(env, "QUERY_SHOW_TEXT", cls.show_text),
             min_score=min_score,

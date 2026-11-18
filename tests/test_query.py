@@ -26,27 +26,21 @@ def test_style_color_and_plain() -> None:
     assert PLAIN.yellow("x") == "x"
 
 
-@pytest.mark.parametrize(("score", "code"), [(0.9, "32"), (0.6, "33"), (0.2, "31")])
-def test_score_bar_colors(score: float, code: str) -> None:
-    bar = Style(color=True).score_bar(score, width=10)
-    assert bar.startswith(f"\033[{code}m")
-    assert bar.count("█") == round(score * 10)
-
-
 def test_format_result_full() -> None:
-    hit = _hit(page_title="T", page_url="http://u", section="S", tags=["a", "b"], text="line1\nline2")
+    hit = _hit(title="T", url="http://u", heading_path="S", topics=["a", "b"], tier="member", text="line1\nline2")
     out = query.format_result(1, hit, show_text=True, text_width=40, style=PLAIN)
     assert out.splitlines()[0] == "#1  T  ›  S"  # noqa: RUF001 -- the glyph under test
     assert "http://u" in out
     assert "0.900" in out
-    assert "tags: a, b" in out
+    assert "topics: a, b" in out
+    assert "member" in out
     assert "│ line1 line2" in out
 
 
 def test_format_result_minimal() -> None:
-    out = query.format_result(2, _hit(page_path="p/x"), show_text=True, text_width=40, style=PLAIN)
+    out = query.format_result(2, _hit(path="p/x"), show_text=True, text_width=40, style=PLAIN)
     assert out.splitlines()[0] == "#2  p/x"
-    assert "tags" not in out
+    assert "topics" not in out
     assert "│" not in out
     assert query.format_result(3, _hit(), False, 40, PLAIN).startswith("#3  Untitled")
     no_payload = ScoredPoint(id=1, version=0, score=0.5, payload=None)
@@ -84,7 +78,7 @@ class FakeClient:
 def fakes(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(config, "OpenAIEmbedder", FakeEmbedder)
     monkeypatch.setattr(query, "QdrantClient", FakeClient)
-    for var in ("QUERY_LIMIT", "QUERY_MIN_SCORE", "QUERY_SHOW_TEXT", "QUERY_WIDTH", "NO_COLOR", "QDRANT_COLLECTION"):
+    for var in ("QUERY_LIMIT", "QUERY_MIN_SCORE", "QUERY_SHOW_TEXT", "QUERY_WIDTH", "NO_COLOR", "QUERY_TIER"):
         monkeypatch.delenv(var, raising=False)
     FakeEmbedder.error = None
     FakeClient.hits = []
@@ -101,7 +95,7 @@ def test_version(capsys: pytest.CaptureFixture[str]) -> None:
 def test_prints_results_with_flags(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("QDRANT_HOST", "qh")
     monkeypatch.setenv("QDRANT_PORT", "1234")
-    FakeClient.hits = [_hit(page_title="One", text="body"), _hit(page_title="Two")]
+    FakeClient.hits = [_hit(title="One", text="body"), _hit(title="Two")]
     out = io.StringIO()
     argv = ["--limit", "2", "--min-score", "0.5", "-c", "coll", "--show-text", "--width", "30", "hello", "world"]
     assert query.main(argv, out) == 0
@@ -115,18 +109,29 @@ def test_prints_results_with_flags(monkeypatch: pytest.MonkeyPatch) -> None:
     assert FakeClient.last_kwargs["collection_name"] == "coll"
     assert FakeClient.last_kwargs["limit"] == 2
     assert FakeClient.last_kwargs["score_threshold"] == 0.5
+    prefetch = FakeClient.last_kwargs["prefetch"]
+    assert isinstance(prefetch, list)
+    assert [p.using for p in prefetch] == ["dense", "sparse"]
 
 
 def test_environment_defaults_and_color(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("QUERY_LIMIT", "7")
-    monkeypatch.setenv("QDRANT_COLLECTION", "envcoll")
-    FakeClient.hits = [_hit(page_title="One")]
+    monkeypatch.setenv("QUERY_TIER", "member")
+    FakeClient.hits = [_hit(title="One")]
     out = TtyOut()
     assert query.main(["q"], out) == 0
     assert "\033[1m" in out.getvalue()
     assert FakeClient.last_kwargs["limit"] == 7
-    assert FakeClient.last_kwargs["collection_name"] == "envcoll"
+    assert FakeClient.last_kwargs["collection_name"] == "hs_member"
     assert FakeClient.last_kwargs["score_threshold"] is None
+
+
+def test_tier_flag_picks_collection() -> None:
+    collections = []
+    for argv in (["--tier", "member", "q"], ["q"]):
+        assert query.main(argv, io.StringIO()) == 0
+        collections.append(FakeClient.last_kwargs["collection_name"])
+    assert collections == ["hs_member", "hs_public"]
 
 
 def test_no_results() -> None:

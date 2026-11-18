@@ -6,7 +6,44 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+The wiki ingester becomes the wiki source of the shared, tiered RAG
+pipeline. Existing indexed data is not migrated: the new collections are
+built from scratch.
+
 ### Added
+
+- Two crawls: anonymous (no credentials) for `tier: public`, and
+  `WIKI_MEMBER_API_KEY` (a members-group key) for `tier: member`. Public
+  points go to `hs_public` and `hs_member`; member-only points to
+  `hs_member` only (`QDRANT_PUBLIC_COLLECTION`, `QDRANT_MEMBER_COLLECTION`).
+  Tier is recomputed every run. A run stops if a key has admin rights.
+  If guests can't use the GraphQL listing, pages are checked as a guest.
+- Postgres staging store (`DATABASE_URL`; a `postgres` service in compose):
+  normalized pages, links, attachments, LLM cache, review queue,
+  quarantine, sync status and the entity registry. `wikijs2rag --reindex`
+  rebuilds the collections from it without refetching.
+- Every locale; outbound links (internal and external); linked PDFs and text
+  files indexed as children of their page; images staged with alt text and
+  caption, described by `VISION_MODEL` when set.
+- Sanitization: a secret scanner that redacts and reports to the quarantine
+  table, network identifiers in code blocks replaced with placeholders, and
+  an LLM exclusion classifier for member content with a review queue.
+- LLM enrichment (`LLM_MODEL`, `LLM_BASE_URL`, `LLM_API_KEY`): page kind,
+  page summary point, per-chunk context line, topics from the shared
+  taxonomy (`TOPICS_FILE`), all cached by content hash. Deterministic
+  fallbacks without an LLM.
+- Linker: registry aliases tag chunks with `asset_ids`, `location_ids`,
+  `training_ids`, …; equipment, area, training and build pages are recorded
+  in `entity_documents`.
+- Hybrid vectors: named `dense` and `sparse` (keyword, IDF) vectors per
+  point; `wikijs2rag-query` fuses them with reciprocal rank fusion and takes
+  `--tier`.
+- Full reconcile every `RECONCILE_INTERVAL_SECONDS` (or `--full`) with
+  run-ID stamping, deletion of what's gone, and a safety valve; a per-source
+  lock and status row.
+- Canaries (`CANARY_ADMIN`, `CANARY_MEMBER`) stop a run that sees one where
+  it must not.
+- `wikijs2rag-report`: `status`, `stale`, `flagged`, `links`, `canaries`.
 
 - `EMBEDDING_QUERY_PREFIX` and `EMBEDDING_DOCUMENT_PREFIX`: task prefixes put
   before queries and documents before embedding. Unset, they default to the
@@ -16,6 +53,28 @@ All notable changes to this project are documented here. The format follows
   service (profile `tei`, on in `.env.example`).
 
 ### Changed
+
+- **Breaking:** new payload fields (see README): `source`, `doc_id`,
+  `title`, `heading_path`, `url`, `tier`, `authority`, `chunk_kind`,
+  `page_kind`, entity ID lists, `topics`, … replace `page_id`,
+  `page_title`, `page_path`, `page_url`, `section_breadcrumb`,
+  `prev_chunk_id`, `next_chunk_id`, `parent_chunk_index`, `total_chunks`
+  and `is_meta`. `section` now means the space section, not a heading.
+  Point IDs are stable (uuid5 of source, doc and chunk index).
+- **Breaking:** chunking follows headings first, then size
+  (`CHUNK_TARGET_TOKENS`, `CHUNK_MAX_TOKENS`, `CHUNK_OVERLAP_TOKENS`); URLs
+  open at the heading's anchor.
+- **Breaking:** wiki metadata no longer lists contributors or author names.
+- Collections record their embedding model; a run with a different one
+  stops instead of mixing vectors.
+
+### Removed
+
+- **Breaking:** `WIKI_API_KEY`, `QDRANT_COLLECTION`, `CHUNK_SIZE`,
+  `CHUNK_OVERLAP` and `PARENT_CHUNK_RATIO`; setting one is a configuration
+  error that names its replacement.
+
+### Changed (embeddings)
 
 - **Breaking:** the default embedding model is now
   `nomic-ai/modernbert-embed-base` served by TEI (`OPENAI_BASE_URL` defaults

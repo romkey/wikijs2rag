@@ -25,12 +25,15 @@ x-app: &app
   environment:
     QDRANT_HOST: qdrant
     OPENAI_BASE_URL: ${OPENAI_BASE_URL:-http://tei/v1}
+    DATABASE_URL: postgresql+psycopg://wikijs2rag:${POSTGRES_PASSWORD:?set it in .env}@postgres/wikijs2rag
   extra_hosts:
     - "host.docker.internal:host-gateway"  # reach an embeddings server on the host
   volumes:
     - .:/app
     - uv-cache:/root/.cache/uv
   depends_on:
+    postgres:
+      condition: service_healthy
     qdrant:
       condition: service_healthy
     tei:
@@ -48,6 +51,12 @@ services:
     <<: *app
     profiles: [tools]
     entrypoint: ["uv", "run", "--locked", "wikijs2rag-query"]
+
+  # Status, reports and the canary check (docker compose run --rm report status).
+  report:
+    <<: *app
+    profiles: [tools]
+    entrypoint: ["uv", "run", "--locked", "wikijs2rag-report"]
 
   # Hugging Face Text Embeddings Inference: serves EMBEDDING_MODEL at
   # http://tei/v1 inside this network and on host port TEI_PORT. Runs when
@@ -76,6 +85,21 @@ services:
       retries: 30
       start_period: 300s  # model download on first start
 
+  # Staging store and entity registry, shared with the other sources' ingesters.
+  postgres:
+    image: postgres:18.1
+    environment:
+      POSTGRES_USER: wikijs2rag
+      POSTGRES_DB: wikijs2rag
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "wikijs2rag", "-d", "wikijs2rag"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
   qdrant:
     image: qdrant/qdrant:v1.20.0
     ports:
@@ -96,6 +120,7 @@ services:
       start_period: 20s
 
 volumes:
+  postgres_data:
   uv-cache:
   qdrant_data:
   tei_data:

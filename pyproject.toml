@@ -1,7 +1,7 @@
 [project]
 name = "wikijs2rag"
 version = "2.0.2"
-description = "Ingest public Wiki.js pages into a Qdrant vector store for RAG, with OpenAI-compatible embeddings."
+description = "Sync a Wiki.js wiki into tiered (public/member) Qdrant collections for RAG, via a Postgres staging store."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -13,9 +13,13 @@ classifiers = [
   "Programming Language :: Python :: 3.15",
 ]
 dependencies = [
-  "beautifulsoup4>=4.15.0",  # HTML scraping fallback for pages GraphQL won't serve
-  "httpx>=0.28.1",           # Wiki.js GraphQL and embeddings HTTP APIs
+  "beautifulsoup4>=4.15.0",  # HTML parsing: links, anchors, images, scraping fallback
+  "httpx>=0.28.1",           # Wiki.js, embeddings and LLM HTTP APIs
+  "markdownify>=1.2.3",      # rendered HTML to markdown for non-markdown pages
+  "psycopg[binary]>=3.3.9",  # Postgres driver for the staging database
+  "pypdf>=7.1.0",            # text from PDF attachments
   "qdrant-client>=1.20.0",   # vector store
+  "sqlalchemy>=2.1.9",       # staging database (Postgres; SQLite in tests)
 ]
 
 [project.urls]
@@ -26,6 +30,7 @@ Issues = "https://github.com/romkey/wikijs2rag/issues"
 [project.scripts]
 wikijs2rag = "wikijs2rag.__main__:main"
 wikijs2rag-query = "wikijs2rag.query:main"
+wikijs2rag-report = "wikijs2rag.report:main"
 
 [dependency-groups]
 dev = [

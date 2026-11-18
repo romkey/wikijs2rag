@@ -1,8 +1,11 @@
-"""Search the wikijs2rag Qdrant collection from the command line.
+"""Search the tiered Qdrant collections from the command line.
+
+Hybrid search: dense and sparse (keyword) results fused with reciprocal
+rank fusion, as the retrieval service does before reranking.
 
 Usage:
     wikijs2rag-query "how do I reset my password?"
-    wikijs2rag-query --limit 10 --collection wiki "event manager setup"
+    wikijs2rag-query --tier member --limit 10 "event manager setup"
     wikijs2rag-query --show-text "access control list"
 
 Docker:
@@ -18,10 +21,11 @@ from dataclasses import dataclass
 from typing import TextIO
 
 from qdrant_client import QdrantClient
-from qdrant_client.models import ScoredPoint
+from qdrant_client.models import Fusion, FusionQuery, Prefetch, ScoredPoint
 
-from wikijs2rag import __version__
+from wikijs2rag import __version__, sparse
 from wikijs2rag.config import ConfigError, QuerySettings
+from wikijs2rag.store import DENSE, SPARSE
 
 # ── Styling ───────────────────────────────────────────────────────────────────
 
@@ -47,12 +51,6 @@ class Style:
     def yellow(self, t: str) -> str:
         return self._c("33", t)
 
-    def score_bar(self, score: float, width: int = 20) -> str:
-        filled = round(score * width)
-        bar = "█" * filled + "░" * (width - filled)
-        color = "32" if score >= 0.7 else ("33" if score >= 0.5 else "31")
-        return self._c(color, bar)
-
 
 # ── Formatting ────────────────────────────────────────────────────────────────
 
@@ -60,21 +58,22 @@ class Style:
 def format_result(rank: int, hit: ScoredPoint, show_text: bool, text_width: int, style: Style) -> str:
     p = hit.payload or {}
     score = hit.score
-    title = p.get("page_title") or p.get("page_path") or "Untitled"
-    url = p.get("page_url", "")
-    section = p.get("section", "")
-    tags = p.get("tags") or []
+    title = p.get("title") or p.get("path") or "Untitled"
+    url = p.get("url", "")
+    section = p.get("heading_path", "")
+    tags = p.get("topics") or p.get("tags") or []
     text = p.get("text", "")
 
     lines = [
         f"{style.bold(f'#{rank}')}  {style.bold(title)}"
         + (f"  {style.dim('›')}  {style.dim(section)}" if section else ""),  # noqa: RUF001 -- intended glyph
         f"   {style.cyan(url)}",
-        f"   score {style.score_bar(score)} {style.yellow(f'{score:.3f}')}",
+        f"   score {style.yellow(f'{score:.3f}')}  {style.dim(str(p.get('tier', '')))}"
+        f"  {style.dim(str(p.get('source', '')))}",
     ]
 
     if tags:
-        lines.append(f"   {style.dim('tags:')} {style.dim(', '.join(tags))}")
+        lines.append(f"   {style.dim('topics:')} {style.dim(', '.join(tags))}")
 
     if show_text and text:
         wrapped = textwrap.fill(
@@ -95,20 +94,21 @@ def _parser() -> argparse.ArgumentParser:
     """Flags default to None, meaning "use the environment" (QuerySettings)."""
     parser = argparse.ArgumentParser(
         prog="wikijs2rag-query",
-        description="Search the wikijs2rag Qdrant collection.",
+        description="Search the tiered Qdrant collections (hybrid dense + keyword).",
         epilog="Defaults come from environment variables; see docs/configuration.md.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument("query", nargs="+", help="Search query text")
     parser.add_argument("-l", "--limit", type=int, metavar="N", help="Number of results (QUERY_LIMIT, default 5)")
     parser.add_argument(
-        "-c", "--collection", metavar="NAME", help="Qdrant collection (QDRANT_COLLECTION, default wiki)"
+        "-t", "--tier", choices=["public", "member"], help="Collection to search by tier (QUERY_TIER, default public)"
     )
+    parser.add_argument("-c", "--collection", metavar="NAME", help="Search this collection instead of the tier's")
     parser.add_argument(
         "--show-text", action="store_true", default=None, help="Print the matched chunk text (QUERY_SHOW_TEXT)"
     )
     parser.add_argument(
-        "--min-score", type=float, metavar="FLOAT", help="Hide results below this similarity, 0-1 (QUERY_MIN_SCORE)"
+        "--min-score", type=float, metavar="FLOAT", help="Hide results below this fused score, 0-1 (QUERY_MIN_SCORE)"
     )
     parser.add_argument("--width", type=int, metavar="N", help="Text wrapping width (QUERY_WIDTH, default 100)")
     return parser
@@ -124,7 +124,8 @@ def main(argv: Sequence[str] | None = None, out: TextIO | None = None) -> int:
         return 2
 
     limit: int = settings.limit if args.limit is None else args.limit
-    collection: str = args.collection or settings.qdrant.collection
+    tier: str = args.tier or settings.tier
+    collection: str = args.collection or settings.qdrant.collection(tier)
     show_text: bool = settings.show_text if args.show_text is None else args.show_text
     min_score: float = settings.min_score if args.min_score is None else args.min_score
     width: int = settings.width if args.width is None else args.width
@@ -145,9 +146,14 @@ def main(argv: Sequence[str] | None = None, out: TextIO | None = None) -> int:
     q = settings.qdrant
     try:
         client = QdrantClient(host=q.host, port=q.port)
+        candidates = max(limit * 4, 20)
         hits = client.query_points(
             collection_name=collection,
-            query=query_vector,
+            prefetch=[
+                Prefetch(query=query_vector, using=DENSE, limit=candidates),
+                Prefetch(query=sparse.query_vector(query_text), using=SPARSE, limit=candidates),
+            ],
+            query=FusionQuery(fusion=Fusion.RRF),
             limit=limit,
             with_payload=True,
             score_threshold=min_score if min_score > 0 else None,
