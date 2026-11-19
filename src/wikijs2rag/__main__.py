@@ -5,6 +5,7 @@ then (unless POLL_INTERVAL_SECONDS is 0) sleeps and repeats until stopped.
 Each run is incremental unless a full reconcile is due
 (RECONCILE_INTERVAL_SECONDS) or --full is given. --reindex rebuilds the
 collections from staging without fetching anything, then exits.
+REINGEST_ON_START=true makes the first run re-fetch and re-index every page.
 """
 
 import argparse
@@ -13,6 +14,7 @@ import signal
 import sys
 import threading
 from collections.abc import Sequence
+from dataclasses import replace
 from types import FrameType
 
 from wikijs2rag import __version__
@@ -57,21 +59,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     signal.signal(signal.SIGINT, on_signal)
 
     interval = settings.poll_interval
+    # The first run re-indexes everything if asked to, until a run gets the
+    # wiki lock and finishes without raising.
+    first = replace(settings, force_reingest=True) if settings.reingest_on_start else settings
     if interval <= 0 or args.reindex:
         # One-shot mode (e.g. `docker compose run --rm app`)
         try:
-            ok = run(settings, stop, full=True if args.full else None, reindex=args.reindex)
+            ok = run(first, stop, full=True if args.full else None, reindex=args.reindex)
         except IngestError as exc:
             logger.error("%s", exc)
             return FATAL
-        return OK if ok else PAGE_ERRORS
+        return PAGE_ERRORS if ok is False else OK
 
     logger.info("wikijs2rag %s running in continuous mode (poll every %d s).", __version__, interval)
     full: bool | None = True if args.full else None
     while not stop.is_set():
         try:
-            run(settings, stop, full=full)
-            full = None
+            if run(first, stop, full=full) is not None:
+                full = None
+                first = settings
         except IngestError as exc:
             logger.error("%s", exc)
             return FATAL

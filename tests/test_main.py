@@ -12,6 +12,7 @@ from wikijs2rag.ingest import IngestError
 type Handler = Callable[[int, object], None]
 
 calls: list[tuple[bool | None, bool]] = []
+forced: list[bool] = []  # settings.force_reingest of each run
 
 
 def test_version(capsys: pytest.CaptureFixture[str]) -> None:
@@ -39,16 +40,20 @@ def handlers(monkeypatch: pytest.MonkeyPatch) -> dict[int, Handler]:
 
 
 def _fake_run(
-    monkeypatch: pytest.MonkeyPatch, results: list[bool | BaseException], on_call: Callable[[], None] | None = None
+    monkeypatch: pytest.MonkeyPatch,
+    results: list[bool | BaseException | None],
+    on_call: Callable[[], None] | None = None,
 ) -> list[threading.Event]:
     """Replace ingest.run with one returning/raising *results* in turn."""
     seen: list[threading.Event] = []
     it = iter(results)
     calls.clear()
+    forced.clear()
 
-    def fake(settings: Settings, stop: threading.Event, full: bool | None = None, reindex: bool = False) -> bool:
+    def fake(settings: Settings, stop: threading.Event, full: bool | None = None, reindex: bool = False) -> bool | None:
         seen.append(stop)
         calls.append((full, reindex))
+        forced.append(settings.force_reingest)
         if on_call:
             on_call()
         r = next(it)
@@ -61,7 +66,9 @@ def _fake_run(
 
 
 @pytest.mark.usefixtures("handlers")
-@pytest.mark.parametrize(("result", "code"), [(True, cli.OK), (False, cli.PAGE_ERRORS), (IngestError("x"), cli.FATAL)])
+@pytest.mark.parametrize(
+    ("result", "code"), [(True, cli.OK), (None, cli.OK), (False, cli.PAGE_ERRORS), (IngestError("x"), cli.FATAL)]
+)
 def test_one_shot(monkeypatch: pytest.MonkeyPatch, result: bool | BaseException, code: int) -> None:
     monkeypatch.setenv("POLL_INTERVAL_SECONDS", "0")
     _fake_run(monkeypatch, [result])
@@ -115,3 +122,32 @@ def test_full_flag_applies_to_first_run(monkeypatch: pytest.MonkeyPatch) -> None
     _fake_run(monkeypatch, [True])
     assert cli.main(["--full"]) == cli.OK
     assert calls == [(True, False)]
+
+
+def test_reingest_on_start_forces_runs_until_one_finishes(
+    monkeypatch: pytest.MonkeyPatch, handlers: dict[int, Handler]
+) -> None:
+    monkeypatch.setenv("POLL_INTERVAL_SECONDS", "5")
+    monkeypatch.setenv("REINGEST_ON_START", "true")
+    monkeypatch.setattr(threading.Event, "wait", lambda self, timeout=None: self.is_set())
+    n = 0
+
+    def on_call() -> None:
+        nonlocal n
+        n += 1
+        if n == 4:
+            handlers[signal.SIGTERM](signal.SIGTERM, None)
+
+    # Raised, then skipped (another run held the lock), then ran.
+    _fake_run(monkeypatch, [RuntimeError("transient"), None, True, True], on_call)
+    assert cli.main([]) == cli.OK
+    assert forced == [True, True, True, False]
+
+
+@pytest.mark.usefixtures("handlers")
+def test_reingest_on_start_one_shot(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("POLL_INTERVAL_SECONDS", "0")
+    monkeypatch.setenv("REINGEST_ON_START", "1")
+    _fake_run(monkeypatch, [True])
+    assert cli.main([]) == cli.OK
+    assert forced == [True]

@@ -161,7 +161,6 @@ def build_staged(settings: Settings, page: JSON, meta: JSON, tier: str) -> tuple
         content_type=content_type,
         raw_content=_redact(raw),
         rendered_html=_redact(render),
-        toc=page.get("toc") or "",
         text=markdown,
         content_hash=text_hash(markdown),
         flags=["secret-redacted"] if hits else [],
@@ -565,18 +564,19 @@ def run(
     stop: threading.Event | None = None,
     full: bool | None = None,
     reindex: bool = False,
-) -> bool:
-    """One sync run. Returns True if every page was processed without error.
-    Raises :class:`IngestError` if the run can't proceed at all. *full* None
-    means a full reconcile if one is due. Stops early, between pages, once
-    *stop* is set."""
+) -> bool | None:
+    """One sync run. Returns True if every page was processed without error,
+    or None if another process holds the wiki lock so nothing ran. Raises
+    :class:`IngestError` if the run can't proceed at all. *full* None means a
+    full reconcile if one is due. Stops early, between pages, once *stop* is
+    set."""
     stop = stop or threading.Event()
     staging = Staging(settings.database_url)
     try:
         with staging.source_lock() as locked:
             if not locked:
                 logger.warning("Another wikijs2rag run holds the wiki lock; skipping this run.")
-                return True
+                return None
             if full is None:
                 full = settings.force_reingest or full_run_due(settings, staging)
             kind = "reindex" if reindex else "full" if full else "incremental"

@@ -7,6 +7,7 @@ from wikijs2rag.config import (
     QdrantSettings,
     QuerySettings,
     Settings,
+    database_url,
 )
 
 WIKI = {"WIKI_URL": "https://wiki.example.com/"}
@@ -52,6 +53,7 @@ def test_reads_environment() -> None:
         "EMBEDDING_BATCH_SIZE": "8",
         "PAGE_DELAY_SECONDS": "0.5",
         "FORCE_REINGEST": "yes",
+        "REINGEST_ON_START": "on",
         "POLL_INTERVAL_SECONDS": "0",
         "LOG_LEVEL": "debug",
     }
@@ -80,6 +82,7 @@ def test_reads_environment() -> None:
         page_delay=0.5,
         attachment_max_bytes=1024 * 1024,
         force_reingest=True,
+        reingest_on_start=True,
         poll_interval=0,
         reconcile_interval=600,
         canary_admin=("a1", "a2"),
@@ -158,6 +161,7 @@ def test_blank_values_use_defaults() -> None:
     assert s.chunk_target_tokens == 400
     assert s.canary_admin == ()
     assert s.force_reingest is False
+    assert s.reingest_on_start is False
 
 
 @pytest.mark.parametrize(
@@ -227,3 +231,24 @@ def test_query_rejects_bad_values(env: dict[str, str], message: str) -> None:
 def test_llm_defaults_to_embeddings_gateway() -> None:
     llm = LLMSettings.from_env({"OPENAI_BASE_URL": "http://gw/v1", "OPENAI_API_KEY": "dummy-key"})
     assert (llm.base_url, llm.api_key, llm.model) == ("http://gw/v1", "dummy-key", None)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("", "sqlite:///wikijs2rag.db"),
+        ("sqlite:////data/s.db", "sqlite:////data/s.db"),
+        ("postgres://u:pw@db/x", "postgresql+psycopg://u:pw@db/x"),
+        ("postgresql://u:pw@db:5432/x", "postgresql+psycopg://u:pw@db:5432/x"),
+        ("postgresql+psycopg://db/x", "postgresql+psycopg://db/x"),
+    ],
+)
+def test_database_url(value: str, expected: str) -> None:
+    assert database_url({"DATABASE_URL": value}) == expected
+
+
+@pytest.mark.parametrize("value", ["mysql://u:secret-pw@db/x", "postgresql+psycopg2://u:secret-pw@db/x", "db"])
+def test_database_url_refuses_other_drivers(value: str) -> None:
+    with pytest.raises(ConfigError, match="DATABASE_URL") as exc:
+        Settings.from_env({**WIKI, "DATABASE_URL": value})
+    assert "secret-pw" not in str(exc.value)

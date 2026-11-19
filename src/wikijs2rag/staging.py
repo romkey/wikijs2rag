@@ -71,7 +71,7 @@ documents = Table(
     Column("content_type", String(32), nullable=False, default=""),
     Column("raw_content", Text, nullable=False, default=""),
     Column("rendered_html", Text, nullable=False, default=""),
-    Column("toc", Text, nullable=False, default=""),
+    Column("toc", Text, nullable=False, default=""),  # unused: Wiki.js 2.x can't serve it (see wiki_client)
     Column("text", Text, nullable=False, default=""),  # clean, sanitized markdown
     Column("content_hash", String(64), nullable=False, default=""),
     Column("tier", String(16), nullable=False),

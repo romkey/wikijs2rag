@@ -18,7 +18,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TextIO
 
 from wikijs2rag import __version__
-from wikijs2rag.config import ConfigError, Settings
+from wikijs2rag.config import ConfigError, Settings, database_url
 from wikijs2rag.content import normalize_heading
 from wikijs2rag.staging import Staging
 from wikijs2rag.store import VectorStore
@@ -144,7 +144,7 @@ def main(argv: Sequence[str] | None = None, out: TextIO | None = None, env: Mapp
             settings = Settings.from_env(env)
             url = settings.database_url
         else:
-            url = env.get("DATABASE_URL", "").strip() or Settings.database_url
+            url = database_url(env, Settings.database_url)
     except ConfigError as exc:
         sys.stderr.write(f"wikijs2rag-report: {exc}\n")
         return 2

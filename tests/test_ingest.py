@@ -5,6 +5,7 @@ import json
 import re
 import threading
 from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -72,7 +73,6 @@ def _page(pid: int, path: str, title: str, content: str, render: str = "", **ext
         "tags": [],
         "content": content,
         "render": render,
-        "toc": "",
         **extra,
     }
 
@@ -108,7 +108,7 @@ class FakeWiki:
             if self.anon_list_broken and not auth:
                 return httpx.Response(200, json={"errors": [{"message": "You are not authorized"}]})
             listed = [
-                {k: v for k, v in p.items() if k not in ("content", "render", "toc")}
+                {k: v for k, v in p.items() if k not in ("content", "render")}
                 for tier, p in self.pages.values()
                 if self._can(request, tier) or (tier == "admin" and self.member_key_is_admin and auth)
             ]
@@ -430,6 +430,15 @@ def test_stop_ends_run_early(wiki: FakeWiki, settings: Settings) -> None:
     stop = threading.Event()
     stop.set()
     assert ingest.run(settings, stop) is False
+
+
+def test_run_skipped_while_locked_returns_none(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    @contextmanager
+    def held(self: Staging, source: str = "wiki") -> Iterator[bool]:
+        yield False
+
+    monkeypatch.setattr(Staging, "source_lock", held)
+    assert ingest.run(settings) is None
 
 
 def test_page_url_and_exclusions() -> None:

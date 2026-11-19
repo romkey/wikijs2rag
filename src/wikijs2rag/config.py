@@ -34,6 +34,24 @@ def _url(env: Mapping[str, str], name: str, default: str | None = None) -> str:
     return value.rstrip("/")
 
 
+_POSTGRES_SCHEMES = ("postgres://", "postgresql://", "postgresql+psycopg://")
+
+
+def database_url(env: Mapping[str, str], default: str = "sqlite:///wikijs2rag.db") -> str:
+    """DATABASE_URL as a SQLAlchemy URL for the drivers installed (SQLite, psycopg).
+
+    postgres:// and postgresql:// (the libpq forms most tools print) use psycopg.
+    """
+    value = _str(env, "DATABASE_URL", default)
+    for scheme in _POSTGRES_SCHEMES:
+        if value.startswith(scheme):
+            return "postgresql+psycopg://" + value.removeprefix(scheme)
+    if value.startswith("sqlite:"):
+        return value
+    shown = value.split("://", 1)[0] if "://" in value else value
+    raise ConfigError(f"DATABASE_URL must start with postgresql:// (or postgres://) or sqlite:, not {shown!r}")
+
+
 def _int(env: Mapping[str, str], name: str, default: int, minimum: int = 0) -> int:
     text = _str(env, name, str(default))
     try:
@@ -215,6 +233,7 @@ class Settings:
     page_delay: float = 0.1
     attachment_max_bytes: int = 20 * 1024 * 1024
     force_reingest: bool = False
+    reingest_on_start: bool = False
     poll_interval: int = 3600
     reconcile_interval: int = 86400
     canary_admin: tuple[str, ...] = ()
@@ -249,7 +268,7 @@ class Settings:
             wiki_excluded_paths=tuple(
                 p.strip("/") for p in _list(env, "WIKI_EXCLUDED_PATHS", cls.wiki_excluded_paths) if p.strip("/")
             ),
-            database_url=_str(env, "DATABASE_URL", cls.database_url),
+            database_url=database_url(env, cls.database_url),
             qdrant=QdrantSettings.from_env(env),
             embedding=EmbeddingSettings.from_env(env),
             llm=llm,
@@ -261,6 +280,7 @@ class Settings:
             page_delay=_float(env, "PAGE_DELAY_SECONDS", cls.page_delay),
             attachment_max_bytes=_int(env, "ATTACHMENT_MAX_MB", 20, minimum=0) * 1024 * 1024,
             force_reingest=_bool(env, "FORCE_REINGEST", cls.force_reingest),
+            reingest_on_start=_bool(env, "REINGEST_ON_START", cls.reingest_on_start),
             poll_interval=_int(env, "POLL_INTERVAL_SECONDS", cls.poll_interval),
             reconcile_interval=_int(env, "RECONCILE_INTERVAL_SECONDS", cls.reconcile_interval, minimum=60),
             canary_admin=_list(env, "CANARY_ADMIN"),

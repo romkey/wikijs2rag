@@ -15,7 +15,7 @@ Blank values count as unset.
 | `WIKI_EXCLUDED_PATHS` | `admin` | Comma-separated path prefixes never ingested, whatever a crawl can see |
 | `CANARY_ADMIN` | none | Comma-separated strings planted in admin-only places. Seen by any crawl, the run stops before staging the page |
 | `CANARY_MEMBER` | none | Comma-separated strings planted in member-only pages. Seen by the anonymous crawl, the run stops |
-| `DATABASE_URL` | `sqlite:///wikijs2rag.db` (compose: the `postgres` service) | SQLAlchemy URL of the staging database, e.g. `postgresql+psycopg://user:pass@host/db` |
+| `DATABASE_URL` | `sqlite:///wikijs2rag.db` (compose: the `postgres` service) | Staging database: `postgresql://user:pass@host/db` (`postgres://` and `postgresql+psycopg://` work too; all use psycopg) or `sqlite:///path` |
 | `QDRANT_HOST` | `qdrant` | Qdrant host (the compose files set `qdrant`) |
 | `QDRANT_PORT` | `6333` | Qdrant REST port, 1-65535 |
 | `QDRANT_PUBLIC_COLLECTION` | `hs_public` | Collection for public-tier points |
@@ -40,6 +40,7 @@ Blank values count as unset.
 | `POLL_INTERVAL_SECONDS` | `3600` | Seconds between incremental runs; `0` runs once and exits |
 | `RECONCILE_INTERVAL_SECONDS` | `86400` | Seconds between full reconciles, at least 60 |
 | `FORCE_REINGEST` | `false` | `true`/`false` (also `1`/`0`, `yes`/`no`, `on`/`off`): every run is full and re-indexes every page |
+| `REINGEST_ON_START` | `false` | Same values: the first run after the service starts is full and re-indexes every page; later runs are incremental. For a one-off rebuild: set it, restart, set it back |
 | `PAGE_DELAY_SECONDS` | `0.1` | Pause between fetched pages, at least 0 |
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL` |
 

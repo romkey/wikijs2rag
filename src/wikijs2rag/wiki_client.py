@@ -69,7 +69,6 @@ query GetPage($id: Int!) {
       title
       content
       render
-      toc
       description
       contentType
       isPublished
@@ -222,7 +221,6 @@ class WikiClient:
             "title": meta.get("title") or "",
             "content": html_content,
             "render": html_content,
-            "toc": "",
             "description": meta.get("description") or "",
             "contentType": "html",
             "tags": [{"tag": t} for t in meta.get("tags") or []],

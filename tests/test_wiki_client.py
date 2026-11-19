@@ -47,7 +47,10 @@ def test_get_page_returns_single(client: WikiClient) -> None:
     page = {"id": 7, "content": "hi"}
     route = respx.post(GQL).mock(return_value=httpx.Response(200, json={"data": {"pages": {"single": page}}}))
     assert client.get_page(7) == page
-    assert json.loads(route.calls.last.request.content)["variables"] == {"id": 7}
+    body = json.loads(route.calls.last.request.content)
+    assert body["variables"] == {"id": 7}
+    # Wiki.js 2.x types toc as a String but can hold an array, failing the query.
+    assert "toc" not in body["query"]
 
 
 @respx.mock
