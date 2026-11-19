@@ -34,6 +34,24 @@ def _url(env: Mapping[str, str], name: str, default: str | None = None) -> str:
     return value.rstrip("/")
 
 
+_POSTGRES_SCHEMES = ("postgres://", "postgresql://", "postgresql+psycopg://")
+
+
+def database_url(env: Mapping[str, str], default: str = "sqlite:///wikijs2rag.db") -> str:
+    """DATABASE_URL as a SQLAlchemy URL for the drivers installed (SQLite, psycopg).
+
+    postgres:// and postgresql:// (the libpq forms most tools print) use psycopg.
+    """
+    value = _str(env, "DATABASE_URL", default)
+    for scheme in _POSTGRES_SCHEMES:
+        if value.startswith(scheme):
+            return "postgresql+psycopg://" + value.removeprefix(scheme)
+    if value.startswith("sqlite:"):
+        return value
+    shown = value.split("://", 1)[0] if "://" in value else value
+    raise ConfigError(f"DATABASE_URL must start with postgresql:// (or postgres://) or sqlite:, not {shown!r}")
+
+
 def _int(env: Mapping[str, str], name: str, default: int, minimum: int = 0) -> int:
     text = _str(env, name, str(default))
     try:
@@ -249,7 +267,7 @@ class Settings:
             wiki_excluded_paths=tuple(
                 p.strip("/") for p in _list(env, "WIKI_EXCLUDED_PATHS", cls.wiki_excluded_paths) if p.strip("/")
             ),
-            database_url=_str(env, "DATABASE_URL", cls.database_url),
+            database_url=database_url(env, cls.database_url),
             qdrant=QdrantSettings.from_env(env),
             embedding=EmbeddingSettings.from_env(env),
             llm=llm,

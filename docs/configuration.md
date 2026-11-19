@@ -15,7 +15,7 @@ Blank values count as unset.
 | `WIKI_EXCLUDED_PATHS` | `admin` | Comma-separated path prefixes never ingested, whatever a crawl can see |
 | `CANARY_ADMIN` | none | Comma-separated strings planted in admin-only places. Seen by any crawl, the run stops before staging the page |
 | `CANARY_MEMBER` | none | Comma-separated strings planted in member-only pages. Seen by the anonymous crawl, the run stops |
-| `DATABASE_URL` | `sqlite:///wikijs2rag.db` (compose: the `postgres` service) | SQLAlchemy URL of the staging database, e.g. `postgresql+psycopg://user:pass@host/db` |
+| `DATABASE_URL` | `sqlite:///wikijs2rag.db` (compose: the `postgres` service) | Staging database: `postgresql://user:pass@host/db` (`postgres://` and `postgresql+psycopg://` work too; all use psycopg) or `sqlite:///path` |
 | `QDRANT_HOST` | `qdrant` | Qdrant host (the compose files set `qdrant`) |
 | `QDRANT_PORT` | `6333` | Qdrant REST port, 1-65535 |
 | `QDRANT_PUBLIC_COLLECTION` | `hs_public` | Collection for public-tier points |

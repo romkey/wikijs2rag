@@ -7,6 +7,7 @@ from wikijs2rag.config import (
     QdrantSettings,
     QuerySettings,
     Settings,
+    database_url,
 )
 
 WIKI = {"WIKI_URL": "https://wiki.example.com/"}
@@ -227,3 +228,24 @@ def test_query_rejects_bad_values(env: dict[str, str], message: str) -> None:
 def test_llm_defaults_to_embeddings_gateway() -> None:
     llm = LLMSettings.from_env({"OPENAI_BASE_URL": "http://gw/v1", "OPENAI_API_KEY": "dummy-key"})
     assert (llm.base_url, llm.api_key, llm.model) == ("http://gw/v1", "dummy-key", None)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("", "sqlite:///wikijs2rag.db"),
+        ("sqlite:////data/s.db", "sqlite:////data/s.db"),
+        ("postgres://u:pw@db/x", "postgresql+psycopg://u:pw@db/x"),
+        ("postgresql://u:pw@db:5432/x", "postgresql+psycopg://u:pw@db:5432/x"),
+        ("postgresql+psycopg://db/x", "postgresql+psycopg://db/x"),
+    ],
+)
+def test_database_url(value: str, expected: str) -> None:
+    assert database_url({"DATABASE_URL": value}) == expected
+
+
+@pytest.mark.parametrize("value", ["mysql://u:secret-pw@db/x", "postgresql+psycopg2://u:secret-pw@db/x", "db"])
+def test_database_url_refuses_other_drivers(value: str) -> None:
+    with pytest.raises(ConfigError, match="DATABASE_URL") as exc:
+        Settings.from_env({**WIKI, "DATABASE_URL": value})
+    assert "secret-pw" not in str(exc.value)

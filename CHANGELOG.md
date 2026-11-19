@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- A `DATABASE_URL` starting with `postgres://` or `postgresql://` failed every
+  run with `Can't load plugin: sqlalchemy.dialects:postgres`. Both now use the
+  bundled psycopg driver, and any other scheme is refused at startup.
+
 ## [3.0.0] - 2026-11-18
 
 The wiki ingester becomes the wiki source of the shared, tiered RAG

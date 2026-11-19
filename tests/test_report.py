@@ -77,3 +77,8 @@ def test_canaries(db: str, memory_qdrant: QdrantClient) -> None:
 def test_bad_config(db: str, capsys: pytest.CaptureFixture[str]) -> None:
     assert _run(["canaries"], {"DATABASE_URL": db})[0] == 2
     assert "WIKI_URL" in capsys.readouterr().err
+
+
+def test_bad_database_url(capsys: pytest.CaptureFixture[str]) -> None:
+    assert _run(["status"], {"DATABASE_URL": "mysql://db/x"})[0] == 2
+    assert "DATABASE_URL" in capsys.readouterr().err
