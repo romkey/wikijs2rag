@@ -6,11 +6,21 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `REINGEST_ON_START=true` re-fetches and re-indexes every page on the first
+  run after the service starts, then goes back to incremental runs: a
+  one-off rebuild, where `FORCE_REINGEST` rebuilds on every run.
+
 ### Fixed
 
 - A `DATABASE_URL` starting with `postgres://` or `postgresql://` failed every
   run with `Can't load plugin: sqlalchemy.dialects:postgres`. Both now use the
   bundled psycopg driver, and any other scheme is refused at startup.
+- Pages whose table of contents Wiki.js stores as a list failed to fetch
+  (`String cannot represent value` on `pages.single.toc`). The ingester no
+  longer asks for the table of contents; section anchors come from the
+  rendered HTML as before.
 
 ### Documentation
 

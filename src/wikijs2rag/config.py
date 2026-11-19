@@ -233,6 +233,7 @@ class Settings:
     page_delay: float = 0.1
     attachment_max_bytes: int = 20 * 1024 * 1024
     force_reingest: bool = False
+    reingest_on_start: bool = False
     poll_interval: int = 3600
     reconcile_interval: int = 86400
     canary_admin: tuple[str, ...] = ()
@@ -279,6 +280,7 @@ class Settings:
             page_delay=_float(env, "PAGE_DELAY_SECONDS", cls.page_delay),
             attachment_max_bytes=_int(env, "ATTACHMENT_MAX_MB", 20, minimum=0) * 1024 * 1024,
             force_reingest=_bool(env, "FORCE_REINGEST", cls.force_reingest),
+            reingest_on_start=_bool(env, "REINGEST_ON_START", cls.reingest_on_start),
             poll_interval=_int(env, "POLL_INTERVAL_SECONDS", cls.poll_interval),
             reconcile_interval=_int(env, "RECONCILE_INTERVAL_SECONDS", cls.reconcile_interval, minimum=60),
             canary_admin=_list(env, "CANARY_ADMIN"),

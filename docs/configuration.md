@@ -40,6 +40,7 @@ Blank values count as unset.
 | `POLL_INTERVAL_SECONDS` | `3600` | Seconds between incremental runs; `0` runs once and exits |
 | `RECONCILE_INTERVAL_SECONDS` | `86400` | Seconds between full reconciles, at least 60 |
 | `FORCE_REINGEST` | `false` | `true`/`false` (also `1`/`0`, `yes`/`no`, `on`/`off`): every run is full and re-indexes every page |
+| `REINGEST_ON_START` | `false` | Same values: the first run after the service starts is full and re-indexes every page; later runs are incremental. For a one-off rebuild: set it, restart, set it back |
 | `PAGE_DELAY_SECONDS` | `0.1` | Pause between fetched pages, at least 0 |
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL` |
 

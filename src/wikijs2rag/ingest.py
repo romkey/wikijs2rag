@@ -161,7 +161,6 @@ def build_staged(settings: Settings, page: JSON, meta: JSON, tier: str) -> tuple
         content_type=content_type,
         raw_content=_redact(raw),
         rendered_html=_redact(render),
-        toc=page.get("toc") or "",
         text=markdown,
         content_hash=text_hash(markdown),
         flags=["secret-redacted"] if hits else [],

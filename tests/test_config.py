@@ -53,6 +53,7 @@ def test_reads_environment() -> None:
         "EMBEDDING_BATCH_SIZE": "8",
         "PAGE_DELAY_SECONDS": "0.5",
         "FORCE_REINGEST": "yes",
+        "REINGEST_ON_START": "on",
         "POLL_INTERVAL_SECONDS": "0",
         "LOG_LEVEL": "debug",
     }
@@ -81,6 +82,7 @@ def test_reads_environment() -> None:
         page_delay=0.5,
         attachment_max_bytes=1024 * 1024,
         force_reingest=True,
+        reingest_on_start=True,
         poll_interval=0,
         reconcile_interval=600,
         canary_admin=("a1", "a2"),
@@ -159,6 +161,7 @@ def test_blank_values_use_defaults() -> None:
     assert s.chunk_target_tokens == 400
     assert s.canary_admin == ()
     assert s.force_reingest is False
+    assert s.reingest_on_start is False
 
 
 @pytest.mark.parametrize(
