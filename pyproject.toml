@@ -1,6 +1,6 @@
 [project]
 name = "wikijs2rag"
-version = "3.0.0"
+version = "3.0.1"
 description = "Sync a Wiki.js wiki into tiered (public/member) Qdrant collections for RAG, via a Postgres staging store."
 readme = "README.md"
 license = "MIT"

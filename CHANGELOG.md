@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [3.0.1] - 2026-11-19
+
 ### Added
 
 - `REINGEST_ON_START=true` re-fetches and re-indexes every page on the first
