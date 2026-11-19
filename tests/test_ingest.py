@@ -5,6 +5,7 @@ import json
 import re
 import threading
 from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -429,6 +430,15 @@ def test_stop_ends_run_early(wiki: FakeWiki, settings: Settings) -> None:
     stop = threading.Event()
     stop.set()
     assert ingest.run(settings, stop) is False
+
+
+def test_run_skipped_while_locked_returns_none(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    @contextmanager
+    def held(self: Staging, source: str = "wiki") -> Iterator[bool]:
+        yield False
+
+    monkeypatch.setattr(Staging, "source_lock", held)
+    assert ingest.run(settings) is None
 
 
 def test_page_url_and_exclusions() -> None:

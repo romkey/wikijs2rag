@@ -59,7 +59,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     signal.signal(signal.SIGINT, on_signal)
 
     interval = settings.poll_interval
-    # The first run (until one finishes) re-indexes everything if asked to.
+    # The first run re-indexes everything if asked to, until a run gets the
+    # wiki lock and finishes without raising.
     first = replace(settings, force_reingest=True) if settings.reingest_on_start else settings
     if interval <= 0 or args.reindex:
         # One-shot mode (e.g. `docker compose run --rm app`)
@@ -68,15 +69,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         except IngestError as exc:
             logger.error("%s", exc)
             return FATAL
-        return OK if ok else PAGE_ERRORS
+        return PAGE_ERRORS if ok is False else OK
 
     logger.info("wikijs2rag %s running in continuous mode (poll every %d s).", __version__, interval)
     full: bool | None = True if args.full else None
     while not stop.is_set():
         try:
-            run(first, stop, full=full)
-            full = None
-            first = settings
+            if run(first, stop, full=full) is not None:
+                full = None
+                first = settings
         except IngestError as exc:
             logger.error("%s", exc)
             return FATAL
