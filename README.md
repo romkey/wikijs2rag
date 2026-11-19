@@ -314,6 +314,25 @@ member pages:
 2. As an administrator, go to **Administration → API Access** and create a
    key whose permission scope is **that group**. Never choose **Full
    Access**: the pipeline checks, and stops if the key can list API keys.
+
+   Full Access starts checked, and the **Group** list stays greyed out until
+   it's off. In Wiki.js 2.5, clicking the checkbox itself toggles it twice,
+   so it stays on: click the words **Full Access** instead. If that doesn't
+   work either, open `https://<your-wiki>/graphql` while signed in as an
+   administrator and run the mutation the dialog sends, with the group's ID
+   (the number in its URL under **Administration → Groups**):
+
+   ```graphql
+   mutation {
+     authentication {
+       createApiKey(name: "RAG pipeline", expiration: "3y", fullAccess: false, group: 3) {
+         key
+         responseResult { succeeded message }
+       }
+     }
+   }
+   ```
+
 3. Put it in `.env` as `WIKI_MEMBER_API_KEY`, and set `LLM_MODEL`.
 4. Plant canaries: a unique string in an admin-only page (`CANARY_ADMIN`)
    and one in a member-only page (`CANARY_MEMBER`). Then run

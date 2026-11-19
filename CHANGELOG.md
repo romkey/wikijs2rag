@@ -12,6 +12,11 @@ All notable changes to this project are documented here. The format follows
   run with `Can't load plugin: sqlalchemy.dialects:postgres`. Both now use the
   bundled psycopg driver, and any other scheme is refused at startup.
 
+### Documentation
+
+- Creating the member API key: how to get past Wiki.js 2.5's Full Access
+  checkbox, which can't be unchecked by clicking it, and a GraphQL fallback.
+
 ## [3.0.0] - 2026-11-18
 
 The wiki ingester becomes the wiki source of the shared, tiered RAG
